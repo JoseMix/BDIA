@@ -130,6 +130,32 @@ El modelo lógico cumple hasta la Tercera Forma Normal (3FN) en todas sus tablas
 
 **En el diseño:** se revisó cada tabla y no se encontraron dependencias transitivas. El caso más cercano a una violación sería `empleados.departamento` dependiendo de `empleados.id_rol` (si cada rol perteneciera siempre a un único departamento) — se descarta porque un mismo rol puede existir en varios departamentos, así que `departamento` es atributo propio del empleado, no derivado del rol. Se cumple en las 8 tablas.
 
+## Problemas que evita la normalización
+
+| Problema | Qué pasaría sin normalizar | Cómo lo evita este diseño |
+|---|---|---|
+| Redundancia | Repetir `nombre`/`apellido` del empleado en cada fila de `ticket_logs` (una por cada cambio de estado de cada ticket) | `ticket_logs.id_empleado` referencia a `empleados`; el nombre se guarda una única vez |
+| Anomalía de inserción | No poder dar de alta un `rol` nuevo (ej. "Supervisor Nivel 2") hasta que exista un empleado con ese rol, si el rol viviera como texto suelto dentro de `empleados` | `roles` es una entidad propia con su propia PK; se puede crear un rol sin empleados asignados todavía |
+| Anomalía de actualización | Si la descripción de un rol se repitiera en cada empleado que lo tiene, cambiar el nombre de un rol obligaría a actualizar N filas de `empleados`, con riesgo de dejar alguna desactualizada | `empleados.id_rol` es FK a `roles`; la descripción se actualiza en un único lugar |
+| Anomalía de eliminación | Si `consultas` y `respuestas` fueran columnas embebidas en `tickets` en lugar de tablas propias, depurar o cerrar un ticket podría arrastrar la pérdida de toda la conversación asociada | Cada entidad (`conversaciones`, `consultas`, `respuestas`) tiene su propio ciclo de vida y PK; además `tickets`/`empleados`/`clientes` usan *soft delete* (`activo = false`) en lugar de `DELETE` físico, por lo que nunca se pierde historial |
+| Inconsistencia de dominio | `canal_origen` o `estado` como texto libre permitirían valores como "WhatsApp"/"whatsapp"/"wsp" para el mismo concepto | `CHECK (canal_origen IN (...))` y `CHECK (estado IN (...))` fijan un dominio cerrado de valores válidos |
+
+## Desnormalización controlada
+
+Existen dos desnormalizaciones **intencionales**, documentadas y justificadas por patrón de consulta (no por descuido de diseño):
+
+**a) `tickets.id_empleado` (asignación actual) frente al histórico de `ticket_logs`:**
+
+El empleado asignado actualmente a un ticket se refleja tanto en `tickets.id_empleado` como, implícitamente, en la última fila de `ticket_logs` de ese ticket.
+- *Ventaja:* la consulta más frecuente del sistema —"¿qué tickets tiene asignados cada operador ahora mismo?"— se resuelve con un filtro directo sobre `tickets`, sin calcular por cada ticket cuál es su log más reciente.
+- *Compromiso:* ambos valores deben mantenerse sincronizados (toda reasignación debe escribirse en `tickets` y en `ticket_logs`, idealmente en la misma transacción). Se acepta este costo de escritura porque un ticket se reasigna pocas veces pero se consulta su estado actual constantemente.
+
+**b) Índice vectorial de consultas/respuestas frecuentes (extensión `pgvector`):**
+
+Para identificar consultas frecuentes y sugerir respuestas, se mantiene una tabla de solo lectura (`consultas_embeddings`) que **referencia** `id_consulta`/`id_respuesta` (para trazabilidad) pero **duplica (embebe)** el texto normalizado de pregunta y respuesta junto a su vector, evitando un `JOIN` contra las tablas transaccionales en cada búsqueda por similitud.
+- *Ventaja:* las búsquedas de similitud no compiten por bloqueos ni I/O con las tablas operativas y se benefician de un índice `HNSW` dedicado.
+- *Compromiso:* si el texto original se corrige después de indexado, el contenido embebido queda desactualizado hasta la próxima reindexación — se acepta **consistencia eventual** en este componente puntual, mientras el núcleo transaccional mantiene consistencia fuerte en todo momento.
+
 ## Conclusión
 
-El modelo evita redundancia, anomalías de inserción/actualización/borrado. La única desnormalización intencional es `tickets.id_empleado` (asignación actual) frente al histórico en `ticket_logs`, ya documentada como desnormalización controlada por rendimiento, no como violación de forma normal.
+El modelo relacional cumple 1FN, 2FN y 3FN en sus 8 tablas, evitando redundancia y anomalías de inserción, actualización y eliminación tal como se detalla arriba. Las únicas desnormalizaciones del diseño son las dos descritas en la sección anterior, ambas intencionales, acotadas y justificadas por el patrón de consulta que resuelve, no representan una violación de forma normal sino una decisión de diseño explícita.
