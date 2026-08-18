@@ -113,20 +113,130 @@ Se identificaron dos desnormalizaciones **intencionales**, documentadas y justif
 Se reconoce que, si el volumen de búsquedas semánticas creciera órdenes de magnitud (por ejemplo, si la solución se ofreciera como plataforma multi-tenant a muchas empresas), podría justificarse migrar el componente vectorial a un motor dedicado. A la escala del caso propuesto (una empresa gestionando su propia atención al cliente), esa complejidad adicional no se justifica hoy.
 
 ### 8. Implementación mínima realizada
-* **Alcance de la implementación:** [Resumen de los componentes principales creados].
-* **Scripts / Definición de estructuras:** Referencia a los archivos de creación de tablas, colecciones o esquemas ubicados en el repositorio.
+
+#### 8.1 Alcance de la implementación
+
+La implementación mínima se realizó en **PostgreSQL 16** sobre una base de datos denominada `bdia`. Se construyó el núcleo relacional completo definido en el modelo lógico, compuesto por las tablas `roles`, `clientes`, `empleados`, `tickets`, `ticket_logs`, `conversaciones`, `consultas` y `respuestas`.
+
+La estructura física incluye:
+
+- Identificadores autonuméricos mediante columnas `IDENTITY`;
+- Claves primarias y foráneas para garantizar la integridad referencial;
+- Restricciones `NOT NULL`, `UNIQUE` y `CHECK` para controlar los dominios;
+- Políticas `ON DELETE RESTRICT` y `ON UPDATE CASCADE` en las relaciones;
+- Borrado lógico mediante el campo `activo` en clientes, empleados y tickets;
+- Nueve índices para claves foráneas y patrones de consulta frecuentes;
+- Un índice único parcial que garantiza una sola respuesta final por consulta;
+- Una vista que presenta el cliente, empleado asignado y último estado de cada ticket.
+
+La extensión `pgvector` y la tabla `consultas_embeddings` se mantienen como propuesta del componente vectorial descripto en el punto 11; no forman parte del núcleo transaccional mínimo implementado en esta etapa.
+
+#### 8.2 Scripts desarrollados
+
+Los archivos deben ejecutarse respetando el siguiente orden:
+
+1. `db/fisico/01_creacion_tablas.sql`: Crea las ocho tablas, sus tipos de datos, claves y restricciones de integridad.
+2. `db/fisico/02_indices_vistas.sql`: Crea los índices de rendimiento, la restricción de respuesta final única y la vista `vw_estado_actual_tickets`.
+3. `data/03_datos_ejemplo.sql`: Carga el conjunto sintético utilizado para comprobar las relaciones y consultas.
+4. `db/fisico/04_validaciones.sql`: Ejecuta trece pruebas automáticas sobre las estructuras creadas.
+
+Todos los scripts utilizan transacciones. Los tres primeros finalizan con `COMMIT` para evitar una implementación parcialmente cargada ante un error. El script de validaciones finaliza con `ROLLBACK`, ya que realiza inserciones y actualizaciones intencionalmente inválidas para comprobar las restricciones sin alterar los datos de ejemplo.
 
 ### 9. Datos de ejemplo utilizados
-* **Estructura de prueba:** Descripción de los datos sintéticos o de muestra generados.
-* **Validación:** Coherencia de los datos para validar de forma efectiva las entidades, relaciones y consultas clave del modelo.
+
+#### 9.1 Estructura de prueba
+
+Se generó un conjunto de datos completamente **sintético**, sin información personal real, con el siguiente volumen:
+
+| Tabla | Registros | Casos representados |
+|---|---:|---|
+| `roles` | 3 | Operador, supervisor y administrador |
+| `empleados` | 5 | Operadores de distintas áreas, un supervisor y un administrador |
+| `clientes` | 6 | Clientes con datos de contacto obligatorios y opcionales |
+| `tickets` | 10 | Todos los canales admitidos y un caso de borrado lógico |
+| `ticket_logs` | 31 | Estados abiertos, en proceso, resueltos, cerrados y reabiertos |
+| `conversaciones` | 10 | Casos con y sin calificación de satisfacción |
+| `consultas` | 12 | Conversaciones con una o varias preguntas |
+| `respuestas` | 17 | Respuestas de IA, humanas, intermedias y finales |
+
+Los datos permiten representar tickets en distintas etapas del ciclo de vida, derivaciones entre operadores, diferentes canales de atención, conversaciones pendientes y finalizadas, calificaciones entre 1 y 5 y consultas con múltiples respuestas. Los identificadores se establecieron explícitamente para facilitar la lectura de las relaciones y, al finalizar la carga, se sincronizaron las secuencias autonuméricas para permitir nuevas inserciones.
+
+#### 9.2 Validación de coherencia
+
+El archivo `db/fisico/04_validaciones.sql` comprueba automáticamente:
+
+- La existencia de las ocho tablas y las cantidades esperadas de datos;
+- La unicidad del DNI de los clientes;
+- La obligatoriedad del correo electrónico;
+- El rechazo de claves foráneas inexistentes;
+- Los dominios cerrados de canales y calificaciones;
+- El rechazo de consultas vacías;
+- La regla de una sola respuesta final por consulta;
+- La aplicación de valores predeterminados;
+- La conservación del historial mediante borrado lógico;
+- El cálculo correcto del último estado a través de la vista;
+- La existencia del índice único parcial y de la vista implementada.
+
+Cada prueba informa un mensaje `OK` cuando PostgreSQL rechaza o procesa el caso de la forma esperada. Como el script completo finaliza con `ROLLBACK`, los registros temporales utilizados en las pruebas no permanecen almacenados.
 
 ### 10. Consultas representativas
 Breve explicación de la utilidad de cada una de las 5 consultas mínimas requeridas, adjuntando el código correspondiente:
-1. **Consulta 1 (Selección y filtrado):** [Explicación y código].
-2. **Consulta 2 (Información relacionada / JOINs):** [Explicación y código].
-3. **Consulta 3 (Agregaciones / Indicadores):** [Explicación y código].
-4. **Consulta 4 (Toma de decisiones):** [Explicación y código].
-5. **Consulta 5 (Optimización mediante Índices/Vistas):** [Explicación y código que justifique el uso de estas estructuras].
+1. **Consulta 1 (Selección y filtrado):** ¿Qué tickets tiene pendiente cierto operador? Muestra los trabajos que todavía tiene por terminar el operador.
+
+SELECT id_ticket, cliente, canal_origen, estado_actual, fecha_ultimo_estado 
+FROM vw_estado_actual_tickets 
+WHERE id_empleado = 3 AND activo = TRUE AND estado_actual IN ('abierto', 'en_proceso', 'reabierto') 
+ORDER BY fecha_ultimo_estado;
+
+2. **Consulta 2 (Información relacionada / JOINs):** Esta consulta responde a la pregunta: ¿Qué consultas realizó un cliente y qué respuestas fueron generadas por IA o enviadas por una persona?
+
+SELECT t.id_ticket, CONCAT_WS(' ', c.nombre, c.apellido) AS cliente, conv.id_conversacion, q.id_consulta, q.pregunta, resp.id_respuesta, resp.texto_respuesta,
+       CASE
+           WHEN resp.es_humano = TRUE THEN 'Humana' 
+           ELSE 'IA'
+       END AS origen_respuesta, resp.es_respuesta_final 
+FROM tickets AS t 
+INNER JOIN clientes AS c ON c.id_cliente = t.id_cliente 
+INNER JOIN conversaciones AS conv ON conv.id_ticket = t.id_ticket
+INNER JOIN consultas AS q ON q.id_conversacion = conv.id_conversacion 
+LEFT JOIN respuestas AS resp ON resp.id_consulta = q.id_consulta 
+WHERE t.id_ticket = 9 
+ORDER BY q.id_consulta, resp.id_respuesta;
+
+3. **Consulta 3 (Agregaciones / Indicadores):** Esta consulta responde el porcentaje de respuestas finales de IA y humanas.
+
+SELECT 
+    CASE 
+        WHEN es_humano = TRUE THEN 'Humana' 
+        ELSE 'IA' END AS origen_respuesta, 
+        COUNT(*) AS cantidad_respuestas_finales, 
+        ROUND( 100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 2 ) AS porcentaje 
+FROM respuestas 
+WHERE es_respuesta_final = TRUE
+GROUP BY es_humano 
+ORDER BY cantidad_respuestas_finales DESC;
+
+4. **Consulta 4 (Toma de decisiones):** Esta consulta responde la carga de trabajo pendiente por cada operador. Para que el supervisor pueda ver cuanto
+trabajo tiene cada operador y asignar tareas en base a ello.
+
+SELECT 
+    e.id_empleado, 
+    CONCAT_WS(' ', e.nombre, e.apellido) AS operador, 
+    COUNT(actual.id_ticket) AS tickets_pendientes 
+FROM empleados AS e 
+INNER JOIN roles AS r ON r.id_rol = e.id_rol 
+LEFT JOIN vw_estado_actual_tickets AS actual ON actual.id_empleado = e.id_empleado AND actual.activo = TRUE AND actual.estado_actual IN ('abierto', 'en_proceso', 'reabierto') 
+WHERE r.descripcion = 'Operador' AND e.activo = TRUE 
+GROUP BY e.id_empleado, e.nombre, e.apellido 
+ORDER BY tickets_pendientes DESC, operador;
+
+5. **Consulta 5 (Optimización mediante Índices/Vistas):** La vista vw_estado_actual_tickets evita repetir en cada consulta los JOIN necesarios para relacionar tickets, clientes, empleados, roles y el último registro de ticket_logs. Esto simplifica las consultas operativas y centraliza la lógica utilizada para determinar el estado actual de cada ticket. Además, la búsqueda del último registro se optimiza mediante el índice compuesto idx_ticket_logs_ticket_fecha, que busca por ticket y el orden descendiente de la fecha.
+
+SELECT canal_origen, estado_actual, COUNT(*) AS cantidad_tickets 
+FROM vw_estado_actual_tickets 
+WHERE activo = TRUE 
+GROUP BY canal_origen, estado_actual0
+ ORDER BY canal_origen, cantidad_tickets DESC;
 
 ### 11. Propuesta para datos semiestructurados, no estructurados o vectoriales
 * **Manejo de datos complejos:** [Analizar la conveniencia de usar formatos JSON/JSONB, colecciones NoSQL u otras estrategias en la solución principal].
@@ -147,4 +257,3 @@ Breve explicación de la utilidad de cada una de las 5 consultas mínimas requer
 
 ### 15. Conclusiones
 * **Balance del diseño:** Resumen de los principales hallazgos, lecciones aprendidas y compromisos asumidos entre rendimiento, consistencia, simplicidad y costo dentro de la solución de datos planteada.
-
