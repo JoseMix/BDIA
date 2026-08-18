@@ -183,13 +183,18 @@ Cada prueba informa un mensaje `OK` cuando PostgreSQL rechaza o procesa el caso 
 Breve explicación de la utilidad de cada una de las 5 consultas mínimas requeridas, adjuntando el código correspondiente:
 1. **Consulta 1 (Selección y filtrado):** ¿Qué tickets tiene pendiente cierto operador? Muestra los trabajos que todavía tiene por terminar el operador.
 
+'''sql
+
 SELECT id_ticket, cliente, canal_origen, estado_actual, fecha_ultimo_estado 
 FROM vw_estado_actual_tickets 
 WHERE id_empleado = 3 AND activo = TRUE AND estado_actual IN ('abierto', 'en_proceso', 'reabierto') 
 ORDER BY fecha_ultimo_estado;
 
+'''sql
+
 2. **Consulta 2 (Información relacionada / JOINs):** Esta consulta responde a la pregunta: ¿Qué consultas realizó un cliente y qué respuestas fueron generadas por IA o enviadas por una persona?
 
+'''sql
 SELECT t.id_ticket, CONCAT_WS(' ', c.nombre, c.apellido) AS cliente, conv.id_conversacion, q.id_consulta, q.pregunta, resp.id_respuesta, resp.texto_respuesta,
        CASE
            WHEN resp.es_humano = TRUE THEN 'Humana' 
@@ -202,9 +207,11 @@ INNER JOIN consultas AS q ON q.id_conversacion = conv.id_conversacion
 LEFT JOIN respuestas AS resp ON resp.id_consulta = q.id_consulta 
 WHERE t.id_ticket = 9 
 ORDER BY q.id_consulta, resp.id_respuesta;
+'''sql
 
 3. **Consulta 3 (Agregaciones / Indicadores):** Esta consulta responde el porcentaje de respuestas finales de IA y humanas.
 
+'''sql
 SELECT 
     CASE 
         WHEN es_humano = TRUE THEN 'Humana' 
@@ -215,10 +222,12 @@ FROM respuestas
 WHERE es_respuesta_final = TRUE
 GROUP BY es_humano 
 ORDER BY cantidad_respuestas_finales DESC;
+'''sql
 
 4. **Consulta 4 (Toma de decisiones):** Esta consulta responde la carga de trabajo pendiente por cada operador. Para que el supervisor pueda ver cuanto
 trabajo tiene cada operador y asignar tareas en base a ello.
 
+'''sql
 SELECT 
     e.id_empleado, 
     CONCAT_WS(' ', e.nombre, e.apellido) AS operador, 
@@ -229,14 +238,17 @@ LEFT JOIN vw_estado_actual_tickets AS actual ON actual.id_empleado = e.id_emplea
 WHERE r.descripcion = 'Operador' AND e.activo = TRUE 
 GROUP BY e.id_empleado, e.nombre, e.apellido 
 ORDER BY tickets_pendientes DESC, operador;
+'''sql
 
 5. **Consulta 5 (Optimización mediante Índices/Vistas):** La vista vw_estado_actual_tickets evita repetir en cada consulta los JOIN necesarios para relacionar tickets, clientes, empleados, roles y el último registro de ticket_logs. Esto simplifica las consultas operativas y centraliza la lógica utilizada para determinar el estado actual de cada ticket. Además, la búsqueda del último registro se optimiza mediante el índice compuesto idx_ticket_logs_ticket_fecha, que busca por ticket y el orden descendiente de la fecha.
 
+'''sql
 SELECT canal_origen, estado_actual, COUNT(*) AS cantidad_tickets 
 FROM vw_estado_actual_tickets 
 WHERE activo = TRUE 
 GROUP BY canal_origen, estado_actual0
- ORDER BY canal_origen, cantidad_tickets DESC;
+ORDER BY canal_origen, cantidad_tickets DESC;
+'''sql
 
 ### 11. Propuesta para datos semiestructurados, no estructurados o vectoriales
 * **Manejo de datos complejos:** [Analizar la conveniencia de usar formatos JSON/JSONB, colecciones NoSQL u otras estrategias en la solución principal].
