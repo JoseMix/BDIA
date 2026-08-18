@@ -1,12 +1,3 @@
--- =============================================================
--- TP Integrador BDIA - Sistema de atencion al cliente con IA
--- Punto 7: Modelo fisico e implementacion minima
--- Motor: PostgreSQL 16
--- Base de datos: bdia
--- Archivo: 02_indices_vistas.sql
--- Requisito previo: ejecutar 01_creacion_tablas.sql
--- =============================================================
-
 BEGIN;
 
 -- -------------------------------------------------------------

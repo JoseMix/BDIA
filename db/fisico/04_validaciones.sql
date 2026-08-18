@@ -1,6 +1,6 @@
 -- Todas las pruebas se ejecutan dentro de una transaccion que
 -- finaliza con ROLLBACK. La base queda sin modificaciones.
--- =============================================================
+
 
 BEGIN;
 

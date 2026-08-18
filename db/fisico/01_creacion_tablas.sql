@@ -1,10 +1,4 @@
--- =============================================================
--- TP Integrador BDIA - Sistema de atencion al cliente con IA
--- Punto 7: Modelo fisico e implementacion minima
--- Motor: PostgreSQL 16
--- Base de datos: bdia
--- Archivo: 01_creacion_tablas.sql
--- =============================================================
+
 
 BEGIN;
 

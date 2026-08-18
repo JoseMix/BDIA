@@ -1,15 +1,3 @@
--- =============================================================
--- TP Integrador BDIA - Sistema de atencion al cliente con IA
--- Punto 7: Datos de ejemplo para la implementacion minima
--- Motor: PostgreSQL 16
--- Base de datos: bdia
--- Archivo: 03_datos_ejemplo.sql
--- Requisitos previos:
---   1. db/fisico/01_creacion_tablas.sql
---   2. db/fisico/02_indices_vistas.sql
--- Este archivo debe ejecutarse una sola vez sobre tablas vacias.
--- =============================================================
-
 BEGIN;
 
 -- -------------------------------------------------------------
