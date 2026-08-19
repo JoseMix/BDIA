@@ -1,13 +1,65 @@
 
 ### 1. Descripción del caso de uso
-* **Problema a resolver:** [Describir el problema elegido y el contexto de aplicación].
-* **Usuarios principales:** [].
-* **Procesos y funcionalidades:** [Detallar los procesos principales que debe soportar la solución].
+* **Problema a resolver:** una empresa recibe consultas de sus clientes por múltiples canales (chat web, correo electrónico, WhatsApp, teléfono y formulario web) y hoy los atiende de manera dispersa: cada canal deja su propio registro, no existe un identificador único de caso que atraviese la interacción completa y el conocimiento generado al resolver una consulta se pierde una vez finalizada la atención.
+
+Esto presenta las siguientes limitaciones:
+
+1. No hay reutilización del conocimiento: consultas equivalentes se responden desde cero una y otra vez, porque el histórico no es consultable por contenido sino, en el mejor de los casos, por fecha o por cliente.
+2. No hay medición confiable de la calidad del servicio: Sin un registro estructurado de los cambios de estado de cada caso, no es posible calcular tiempos de resolución, volumen por canal, carga por operador ni satisfacción del cliente.
+3. No hay trazabilidad: no queda registrado quién intervino en cada momento de la atención.
+
+La empresa desea incorporar asistencia basada en IA para **sugerir respuestas a partir de casos históricos ya resueltos**, **identificar las consultas más frecuentes** y **derivar a un operador humano los casos complejos**, conservando en todo momento el histórico de interacciones para mejorar la atención futura y auditar la calidad del servicio.
+
+* **Usuarios principales:** 
+
+| Usuario | Qué hace en el sistema | Qué necesita del modelo de datos |
+|---|---|---|
+| **Cliente** | Inicia una consulta por alguno de los canales habilitados, recibe una respuesta y califica la atención al cierre | Identidad validada (DNI, email o teléfono), acceso al historial de sus propios casos únicamente |
+| **Operador** | Atiende los tickets asignados, revisa las respuestas sugeridas por la IA, las corrige o redacta las propias, cambia el estado del caso | Ver la conversación completa de sus casos, las sugerencias disponibles y su cola de trabajo |
+| **Supervisor** | Controla la calidad de la atención, redistribuye carga entre operadores y audita casos puntuales | Indicadores agregados (tiempos de resolución, satisfacción por operador y por canal, tickets pendientes) y acceso de lectura al detalle de cualquier caso del equipo |
+| **Administrador** | Gestiona altas y bajas de empleados, roles, canales habilitados y parámetros del sistema | Acceso a las tablas maestras y al esquema |
+| **Sistema de IA** | Lee casos históricos resueltos para sugerir respuestas y detectar consultas frecuentes; escribe respuestas sugeridas | Un subconjunto de datos acotado, **sólo de casos ya resueltos y validados**, con el texto anonimizado y con las mismas restricciones de acceso que aplican al usuario que dispara la consulta |
+
+La distinción del sistema de IA como un usuario más (con sus propios permisos de lectura y escritura) es deliberada ya que si el modelo puede recuperar por similitud semántica un caso al que el operador no tendría acceso por la vía relacional habitual, el control de accesos queda vulnerado por una puerta lateral. 
+
+* **Procesos y funcionalidades:** la solución de datos debe soportar los siguientes procesos:
+
+1. **Identificación del cliente.** El cliente se autentica en la plataforma web o se identifica aportando datos privados (DNI, email o teléfono) al contactar por otro canal. Sus datos están validados al momento de generar el caso.
+2. **Apertura de un ticket.** Todo contacto genera un ticket asociado obligatoriamente a un cliente, a un canal de origen tomado de un dominio predefinido y a un empleado responsable.
+3. **Registro de la conversación.** Cada ticket agrupa una o más conversaciones, y cada conversación contiene una o más consultas concretas del cliente. Esta separación permite que un mismo caso incluya varias preguntas ("¿qué medios de pago aceptan?" y, a continuación, "¿puedo pagar en cuotas?") sin abrir un ticket nuevo por cada una.
+4. **Generación de respuestas.** Una consulta puede acumular varias respuestas: la sugerencia automática de la IA, la corrección del operador y la versión efectivamente enviada al cliente. El modelo debe distinguir el **origen** de cada respuesta (automática o humana) y marcar **cuál fue la que resolvió** la consulta, con la regla de que sólo puede existir una respuesta final por consulta.
+5. **Derivación y cambio de estado.** El caso atraviesa un flujo de estados (abierto → en proceso → resuelto → cerrado, con posibilidad de reapertura) y puede pasar de un operador a otro. Cada transición queda registrada con fecha y empleado responsable, de modo que el historial sea reconstruible y no sobrescribible.
+6. **Cierre y evaluación de satisfacción.** Al finalizar, el cliente puede calificar la atención en una escala acotada. La calificación es opcional.
+7. **Cálculo de indicadores de servicio.** A partir del historial de estados y de las calificaciones, el sistema debe permitir calcular tiempos de resolución por canal, carga pendiente por operador, distribución de casos por canal y estado, y proporción de respuestas resueltas automáticamente frente a las resueltas por una persona.
+8. **Identificación de consultas frecuentes y sugerencia de respuestas.** Sobre el corpus de consultas ya resueltas y sus respuestas validadas, el sistema debe permitir búsquedas por similitud semántica para agrupar temas recurrentes y proponer respuestas a casos nuevos.
+9. **Control de accesos por rol y preservación del historial.** Cada rol accede únicamente al subconjunto de datos que le corresponde, y ninguna baja de cliente, empleado o ticket puede destruir el historial de auditoría asociado.
 
 ### 2. Relevamiento de datos necesarios
-* **Información requerida:** [Enumerar y describir los datos que la solución necesita almacenar o consultar].
-[Ver ejemplos en *datos/* o *data/ejemplos*].
-* **Riesgos asociados:** [Identificar riesgos potenciales en relación con la gestión de estos datos].
+* **Información requerida:** el relevamiento se organizó por entidad del dominio. 
+
+| Entidad | Datos a almacenar | Por qué se necesita |
+|---|---|---|
+| **Cliente** | Nombre, apellido, DNI, email, teléfono principal y alternativo, dirección, estado de actividad | Identificar y validar al cliente al abrir un caso y contactarlo por el canal correspondiente. El DNI y el email son identificadores únicos del cliente en el sistema |
+| **Empleado** | Nombre, apellido, DNI, departamento, rol asignado, estado de actividad | Asignar responsables a los casos, trazar quién intervino en cada cambio de estado y calcular indicadores por operador |
+| **Rol** | Descripción del rol (operador, supervisor, administrador) | Definir el nivel de acceso y las funciones habilitadas para cada empleado. (Se modela como entidad propia para poder incorporar roles nuevos sin modificar el esquema) |
+| **Ticket** | Cliente asociado, empleado responsable actual, canal de origen, estado de actividad | Es la unidad de caso que atraviesa todos los canales y da un identificador único a la atención completa |
+| **Historial de estados (ticket log)** | Ticket, empleado que ejecuta el cambio, fecha y hora, estado alcanzado | Reconstruir el ciclo de vida del caso, auditar derivaciones entre operadores y calcular tiempos de resolución |
+| **Conversación** | Ticket al que pertenece, fecha de inicio, calificación de satisfacción | Agrupar el intercambio dentro de un caso y capturar la evaluación del cliente al cierre |
+| **Consulta** | Conversación a la que pertenece, texto de la pregunta del cliente | Es el texto en lenguaje natural que dispara la atención y la unidad mínima sobre la que la IA busca casos similares |
+| **Respuesta** | Consulta a la que responde, texto de la respuesta, indicador de origen (humano o automático), indicador de respuesta final | Distinguir sugerencia de IA, corrección humana y respuesta efectivamente enviada |
+| **Índice semántico** | Texto de la pregunta y de la respuesta final, canal de origen, vector de embedding, modelo utilizado, fecha de indexación, referencia a la consulta y respuesta de origen | Habilitar la búsqueda por similitud sin recalcular el embedding en cada consulta y sin bloquear las tablas operativas. Es un dato derivado, reconstruible a partir del núcleo transaccional |
+
+* **Riesgos asociados:** 
+| # | Riesgo | Descripción | Mitigación prevista en el diseño |
+|---|---|---|---|
+| R1 | **Exposición de datos personales** | El modelo almacena DNI, email, teléfono y dirección de personas físicas. Una consulta mal filtrada expone información sensible | Control de accesos por rol nativo del motor y *Row Level Security*, de modo que el filtro no dependa de que la aplicación lo recuerde aplicar |
+| R2 | **Fuga de datos sensibles por vía semántica** | El cliente puede pegar su DNI, su email o datos de su tarjeta dentro del texto libre de la consulta. Ese texto se vectoriza e indexa, y luego puede reaparecer como "respuesta sugerida" ante un caso de otro cliente | Anonimizar/enmascarar el texto antes de generar el embedding |
+| R3 | **Sugerencia de información incorrecta o desactualizada** | Si una respuesta final se corrige después de haber sido indexada, el índice semántico sigue sugiriendo la versión anterior. El sistema propaga entonces una respuesta que la empresa ya invalidó | Reindexación asíncrona ante cualquier modificación del texto de una respuesta final; indexar únicamente respuestas marcadas como finales de casos ya resueltos, nunca sugerencias intermedias o descartadas |
+| R4 | **Contaminación del corpus de conocimiento** | La respuesta marcada como final es la que alimenta las sugerencias futuras | Restricción de unicidad de respuesta final por consulta, marca explícita de origen humano o automático y trazabilidad hacia el empleado responsable, para poder auditar |
+| R5 | **Pérdida de trazabilidad por borrado físico** | Eliminar un cliente, un empleado o un ticket destruiría el historial de auditoría asociado y falsearía retroactivamente los indicadores de servicio | Borrado lógico mediante el campo `activo` y políticas `ON DELETE RESTRICT` en todas las claves foráneas: ninguna baja puede arrastrar historial |
+| R6 | **Inconsistencia de dominio en campos categóricos** | Canales y estados cargados como texto libre derivan en valores equivalentes escritos de distinta forma ("WhatsApp", "whatsapp", "wsp"), que rompen silenciosamente toda agregación por canal o por estado | Dominios cerrados verificados por restricciones `CHECK` a nivel de motor |
+| R7 | **Transferencia de datos a un proveedor externo de embeddings** | El texto de las consultas sale de la infraestructura de la empresa | Anonimización previa y, como alternativa evaluable, uso de un modelo de embeddings autoalojado si el volumen o la sensibilidad lo justifican |
+| R8 | **Sesgo en los indicadores de desempeño** | Los indicadores por operador (satisfacción promedio, carga pendiente) pueden usarse para evaluar personas sin considerar la complejidad diferencial de los casos ni el volumen de calificaciones recibidas | Exponer siempre el indicador junto a su denominador (cantidad de conversaciones calificadas) y documentar que se trata de una señal de proceso, no de una calificación individual concluyente |
 
 ### 3. Clasificación de los datos según su tipo
 Clasificación detallada de los datos del dominio según las siguientes categorías:
