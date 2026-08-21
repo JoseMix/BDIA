@@ -302,12 +302,215 @@ ORDER BY canal_origen, cantidad_tickets DESC;
 ```
 
 ### 11. Propuesta para datos semiestructurados, no estructurados o vectoriales
-* **Manejo de datos complejos:** [Analizar la conveniencia de usar formatos JSON/JSONB, colecciones NoSQL u otras estrategias en la solución principal].
-* **Enfoque vectorial y búsquedas semánticas:** Justificación del uso (o no) de una base vectorial, indicando qué datos se vectorizarían, metadatos asociados, consultas por similitud deseadas y mitigación de riesgos de información incorrecta o no autorizada.
+
+> El desarrollo completo de este punto está en `docs/09_datos_semiestructurados_no_estructurados_vectorial.md` (inventario dato por dato, comparación de alternativas de almacenamiento, metadatos del índice semántico, filtros por permisos y análisis de riesgos). Lo que sigue es la síntesis.
+
+#### 11.1 Inventario real del esquema implementado
+
+De las 8 tablas y aproximadamente 40 columnas del modelo físico:
+
+- **Estructurado:** todo el núcleo, con dominios cerrados por `CHECK` (`canal_origen`, `estado`, `calificacion`) e integridad por `FOREIGN KEY`.
+- **Semiestructurado:** **ninguno**. No existe una sola columna `JSON`/`JSONB`, `ARRAY`, `hstore` ni XML en `01_creacion_tablas.sql`.
+- **No estructurado:** exactamente **dos columnas**, `consultas.pregunta` y `respuestas.texto_respuesta`, ambas `TEXT` con `CHECK LENGTH > 0`.
+- **De auditoría:** `ticket_logs` es un log de eventos de negocio, pero **de esquema fijo y dominio cerrado**: no es un log semiestructurado y no corresponde sacarlo del modelo relacional.
+- **Relaciones:** jerarquía lineal de profundidad fija (`cliente → ticket → conversación → consulta → respuesta`); **ninguna relación muchos-a-muchos en las 8 tablas**. No hay estructura "altamente conectada" que justifique un grafo, en línea con lo argumentado en 7.2.
+
+#### 11.2 Manejo de datos complejos: JSON/JSONB sí, pero acotado a tres lugares
+
+JSONB se justifica **solo donde la variabilidad de esquema es real**, no como estrategia general. Tres candidatos concretos, hoy inexistentes:
+
+| Dato | Representación | Motivo |
+|---|---|---|
+| Metadatos técnicos por canal (`message_id` de email, `wa_id`, duración de llamada, sesión de chat web) | `tickets.metadatos_canal JSONB` | Los atributos **cambian según el valor de `canal_origen`**; columnas nullables por canal o un esquema EAV son peores y obligan a migrar el esquema al habilitar un canal nuevo |
+| Trazas de generación de una sugerencia de IA (modelo, tokens, confianza, casos recuperados como contexto) | `respuestas.metadatos_generacion JSONB` | Cambia con cada versión del modelo; hace **auditable** la sugerencia (mitiga R4) sin un `ALTER TABLE` por proveedor. Hoy `es_humano` dice *que* fue automática, no *cómo* |
+| Parámetros del sistema (umbral de similitud, cantidad de sugerencias, canales habilitados) | `parametros(clave TEXT PK, valor JSONB)` | Claves heterogéneas y volumen mínimo. La sección 1 atribuye "parámetros del sistema" al Administrador y **no existe tabla que lo soporte** |
+
+**Regla adoptada:** ningún dato que alimente un indicador de gestión, una FK o una restricción de negocio vive dentro de un JSONB. El JSONB documenta lo accesorio; el esquema tipado garantiza lo que se mide. Por contraste, el motivo de una derivación —que el enunciado pide y hoy queda implícito en `ticket_logs` (ticket 5: logs 14 y 15, mismo estado, distinto empleado)— **no** debe ir a JSONB: su estructura es estable y necesita FK a `empleados`, así que corresponden columnas nuevas (`id_empleado_anterior`, `motivo`).
+
+**No se incorpora ninguna colección NoSQL**, confirmando 7.2. Los binarios que el caso implica pero el modelo no tiene (adjuntos de email, foto de producto dañado, audio del canal `telefono` — hoy el ticket 5 presupone una transcripción no modelada) corresponden a **almacenamiento de objetos externo + tabla de metadatos**, no a `BYTEA` ni a un motor documental.
+
+#### 11.3 Enfoque vectorial: se justifica, acotado a 2 columnas
+
+**Qué se vectorizaría:** únicamente el par `consultas.pregunta` + su `respuestas.texto_respuesta` final, en casos **cerrados y vigentes** — 10 pares en el conjunto de ejemplo.
+
+**Por qué la búsqueda tradicional no alcanza:** es un límite de expresividad, no de rendimiento. El FTS nativo (`tsvector` + GIN, config `spanish`, con `unaccent`) es exacto, barato y **debería implementarse igual, antes que los vectores**; pero no resuelve **sinonimia ni paráfrasis**, que es el problema real (*"clave"* y *"contraseña"* no comparten lexema). La prueba está en los datos del proyecto: la consulta 1 (*"Como puedo restablecer mi contrasena?"*) y la consulta 11 (*"No puedo ingresar a la aplicacion movil"*, respondida con *"actualizar la aplicacion y restablecer la contraseña"*) son el mismo problema y **no comparten una sola palabra de contenido**.
+
+**Metadatos que deben acompañar al vector.** El diseño de `vectorial/modelo_vectorial.md` se suscribe en su estructura general, con nueve correcciones. Las tres decisivas:
+
+1. **Faltan `id_cliente` e `id_ticket`.** Sin ellos, la RLS que ese documento declara **no es implementable** sin el JOIN a `consultas → conversaciones → tickets` que la desnormalización existía para evitar.
+2. **Falta `es_humano` de la respuesta final.** En los datos de ejemplo **3 de las 10 respuestas finales son puramente de IA** (`id_respuesta` 3, 12, 17): indexarlas sin marca hace que el sistema se alimente de su propia salida, que es R4 sin mitigación efectiva.
+3. **Falta la fecha del caso** — y no es derivable de forma barata, porque **ni `consultas` ni `respuestas` tienen columna de fecha**. La recencia es el filtro más importante: una resolución vieja puede ser hoy incorrecta aunque siga siendo la más parecida.
+
+Las otras seis: agregar `hash_contenido` y `vigente`; agregar `UNIQUE (id_consulta)` (sin él la reindexación duplica filas e infla los conteos de "consultas frecuentes"); convertir el filtro por canal en re-ranking blando en lugar de `WHERE canal_origen = ...`, que parte el corpus en cinco por una razón irrelevante al contenido; reemplazar el `GROUP BY contenido_pregunta` de la segunda consulta, que **cuenta duplicados literales y no similares**, por clustering o conteo de vecinos por radio; diferir el índice HNSW, que es aproximado y con 10 filas rinde peor que el scan exacto; y exigir **umbral de distancia** en toda consulta, porque sin él la búsqueda siempre devuelve *k* resultados aunque ninguno sirva.
+
+**Corrección del criterio de indexación, con evidencia en los datos de ejemplo.** Indexar por `es_respuesta_final = TRUE` sin mirar el estado del ticket es insuficiente en dos sentidos verificables:
+
+- **`resuelto` no es un estado terminal** en este modelo: existe `reabierto`, y el ticket 8 recorre `abierto → resuelto → reabierto → en_proceso`. Indexar al llegar a `resuelto` cargaría al corpus un caso que después se probó no resuelto.
+- **Hay respuestas finales en tickets dados de baja:** el **ticket 7 tiene `activo = FALSE`** (borrado lógico por duplicado) y su consulta 7 **sí tiene respuesta final** (`id_respuesta` 10). Con el criterio actual, ese caso entraría al índice y sería sugerible: el riesgo de "documentos eliminados pero presentes en el índice" ya está materializado en el conjunto de prueba.
+
+**Riesgos y mitigación.** Sobre los ya identificados en la sección 2, los específicos del componente semántico:
+
+- **Desactualización silenciosa.** R3 cubre el caso en que el texto cambia. No cubre el caso en que **el texto no cambia y el mundo sí**: *"Se aceptan tarjetas de credito, debito y transferencia bancaria"* (respuesta 12) sigue idéntica cuando la empresa deja de aceptar transferencias, y **ningún trigger lo detecta porque no hubo `UPDATE`**. Solo lo mitigan la ventana de recencia y la revisión periódica. Riesgo abierto.
+- **Falsos positivos plausibles.** Las consultas 9 (*"Que medios de pago aceptan?"*) y 10 (*"Puedo pagar la compra en cuotas?"*) son vecinas muy cercanas con respuestas **no intercambiables**. La negación agrava el problema: *"puedo cancelar"* y *"no puedo cancelar"* son casi idénticos como vectores y opuestos como intención.
+- **Autorización.** `roles` tiene 3 filas (Operador, Supervisor, Administrador): **no existe identidad de base de datos para el "Sistema de IA"** que la sección 1 describe como usuario con permisos propios, ni hay un solo `CREATE POLICY` en los scripts. Hoy la IA consultaría con las credenciales de la aplicación, es decir con acceso a todo el corpus — exactamente la "puerta lateral" que la sección 1 advierte.
+- **Privacidad.** La anonimización debe ocurrir **antes de calcular el embedding**, como ya indica R2, porque el vector conserva información del texto original y existen ataques de inversión. Además queda una tensión abierta: `clientes.activo = FALSE` se documenta como "anonimización de datos personales", pero **nada anonimiza el texto de sus consultas ya indexadas**.
+- **Pérdida de contexto.** La consulta 12 (*"Cuanto tiempo dura el enlace para cambiar la contrasena?"*) solo se entiende leída después de la consulta 1 de su misma conversación; indexada suelta es un fragmento huérfano.
+- **Volumen.** Con 10 pares indexables el componente es **demostrativo, no útil**: su valor aparece a partir de algunos cientos de casos cerrados.
+
+#### 11.4 Conclusión del punto
+
+**Sí se justifica una solución vectorial, acotada y condicionada.** Se justifica porque el enunciado exige sugerir respuestas a partir de casos históricos y el obstáculo es la sinonimia, que ninguna técnica léxica resuelve sin un glosario mantenido a mano indefinidamente. Se acota a **2 columnas de las ~40 del esquema**: el resto del dominio requiere igualdad, rango o agregación, y para eso el B-tree es exacto, más rápido y auditable. Y se condiciona a tres requisitos sin los cuales hace más daño que bien: anonimización previa al cálculo del embedding; RLS efectiva sobre la tabla de vectores (lo que exige `id_cliente`/`id_ticket` y una identidad de base de datos para la IA); y la sugerencia entregada **al operador como borrador**, nunca automáticamente al cliente.
+
+Esa tercera condición ya está soportada por el modelo relacional y es su mejor decisión de diseño para este punto: la sugerencia de IA vive como respuesta no final y un humano crea la final, patrón visible en las cadenas 1→2, 5→6 y 13→14 de los datos de ejemplo.
+
+No se justifica, en cambio, una base vectorial dedicada (`pgvector` en el mismo motor cubre la necesidad con un único modelo de permisos, según 7.2), ni construir el componente antes que el FTS nativo, que hoy tampoco existe y resuelve el caso más frecuente a un costo mucho menor.
 
 ### 12. Propuesta de arquitectura de datos
-* **Diagrama de arquitectura:** [Insertar o hacer referencia al diagrama de arquitectura general].
-* **Flujo y componentes:** Justificación del ciclo de vida de los datos desde la ingesta hasta el consumo por la IA, argumentando la elección de un enfoque simple o estructurado (Data Warehouse, Data Lake, Lakehouse, etc.).
+
+> El desarrollo completo está en `docs/10_arquitectura_de_datos.md` (capa por capa, ciclo de vida extremo a extremo, consistencia y reconstruibilidad por capa, seguridad, etapas de implementación y umbrales de evolución). Lo que sigue es la síntesis.
+
+#### 12.1 Punto de partida
+
+De las nueve capas que la arquitectura contempla, **hoy existe una**: la operacional (8 tablas, 9 índices, 1 vista). No hay ingesta, ni datos crudos, ni capa de procesamiento, ni almacenamiento analítico como tal —los indicadores se calculan en caliente con las consultas de `db/consultas/`—, ni la tabla de embeddings, ni consumidores (no hay código de aplicación), ni control de acceso (ni un `CREATE ROLE` ni un `CREATE POLICY` en todo el proyecto). Por eso el criterio rector es que **cada capa se pueda incorporar por separado y el sistema funcione sin las que faltan**.
+
+Tres reglas gobiernan el diseño: una sola fuente de verdad (el núcleo relacional; todo lo demás es derivado y reconstruible); ninguna capa derivada es indispensable para atender un caso; y el dato personal se degrada al avanzar (identificable en el crudo, con RLS en el operacional, **anonimizado antes de entrar a la capa de IA**).
+
+#### 12.2 Diagrama de arquitectura
+
+```mermaid
+flowchart LR
+  subgraph F["0 · Fuentes"]
+    F1["Cliente<br/>chat · email · whatsapp<br/>telefono · web"]
+    F2["Operador / Supervisor"]
+    F3["Administrador"]
+  end
+  subgraph I["1 · Ingesta"]
+    I1["Adaptadores por canal"]
+    I2["Normalizador +<br/>resolución de identidad"]
+  end
+  subgraph C["2 · Crudo · retención acotada"]
+    C1[("crudo.mensajes_entrantes<br/>payload JSONB")]
+    C2[("Object storage<br/>adjuntos · audio")]
+  end
+  subgraph O["3 · Operacional · ACID + RLS"]
+    O1[("8 tablas<br/>fuente de verdad")]
+    O2[("outbox de eventos")]
+    O3["Índice léxico<br/>tsvector + GIN"]
+  end
+  subgraph P["4 · Procesado"]
+    P1["Transcripción"]
+    P2["Anonimización"]
+    P3["Curación de<br/>elegibilidad"]
+  end
+  subgraph A["5 · Preparado para IA"]
+    A1[("ia.corpus_casos")]
+    A2[("ia.consultas_embeddings")]
+  end
+  subgraph N["6 · Analítico"]
+    N1[("analitico.*<br/>vistas materializadas")]
+  end
+  subgraph Q["7 · Consulta"]
+    Q1["API SQL / vistas"]
+    Q2["Servicio de recuperación<br/>léxico + vectorial"]
+  end
+  subgraph U["8 · Consumidores"]
+    U1["Servicio de sugerencia"]
+    U2["Consola del operador"]
+    U3["Panel del supervisor"]
+    U4["Portal del cliente"]
+  end
+  F1 --> I1
+  I1 --> C1
+  I1 --> C2
+  I1 --> I2
+  I2 --> O1
+  C2 --> P1
+  P1 --> O1
+  F2 --> O1
+  F3 --> O1
+  O1 --> O2
+  O1 --> O3
+  O2 --> P2
+  P2 --> P3
+  P3 --> A1
+  A1 --> A2
+  O1 --> N1
+  O3 --> Q2
+  A2 --> Q2
+  A1 --> Q2
+  O1 --> Q1
+  N1 --> Q1
+  Q2 --> U1
+  Q2 --> U2
+  Q1 --> U2
+  Q1 --> U3
+  Q1 --> U4
+  U1 -.->|"respuesta NO final"| O1
+  U2 -.->|"respuesta final validada"| O1
+```
+
+El dato entra por un canal, se guarda crudo para poder reprocesarlo, se normaliza hacia el núcleo transaccional, y de ahí salen tres derivados independientes —índice léxico, corpus anonimizado con sus vectores, y vistas de indicadores— que alimentan a los cuatro consumidores. Las flechas punteadas son el **lazo de retroalimentación**: la respuesta que el operador valida vuelve al núcleo y desde ahí al corpus. Es lo que el enunciado llama "conservar el historial para mejorar la atención futura", y la única parte cíclica del diseño.
+
+#### 12.3 Flujo y componentes
+
+**Fuentes.** Cinco canales de cliente, más operadores, supervisores, administrador y el sistema de IA. Dato arquitectónicamente decisivo: **los cinco canales convergen en un único esquema**. No son cinco sistemas heterogéneos a integrar, son cinco formatos de entrada del mismo hecho — lo que elimina el principal motivo para construir un Data Warehouse.
+
+**Ingesta.** Un adaptador por canal (webhook, IMAP, telefonía) que produce un evento uniforme y es el único componente que conoce las particularidades del canal; resolución de identidad; y escritura transaccional al núcleo. Aquí aparece un hueco del modelo: `tickets.id_cliente` es `NOT NULL`, así que **no se puede abrir un ticket cuyo cliente todavía no se identificó** —lo primero que llega por WhatsApp o teléfono es un número que puede no estar en `clientes`. La salida adoptada es retener el mensaje en la capa cruda hasta poder identificarlo, en lugar de rechazar el contacto o crear clientes provisionales que violarían `UNIQUE NOT NULL` en `dni` y `email`.
+
+**Orquestación:** tabla **outbox** consumida por un worker. El evento se escribe en la misma transacción que el hecho, así que no puede perderse; es reintentable e idempotente vía `hash_contenido`; y **no agrega infraestructura**. Se descarta `LISTEN`/`NOTIFY` porque el aviso no es persistente, y una cola externa (Kafka, RabbitMQ) porque a este volumen es un broker más que operar sin beneficio, en la misma línea con que 7.2 descartó Cassandra.
+
+**Datos crudos.** Payload original en `crudo.mensajes_entrantes` + binarios en almacenamiento de objetos. Se justifica por tres razones concretas: poder **reprocesar la anonimización** cuando el anonimizador mejore (sin el original, cada mejora aplica solo hacia adelante y el corpus viejo queda con fugas permanentes), poder **reprocesar la transcripción** del canal `telefono`, y **auditoría** ante una disputa sobre qué dijo el cliente. No es un Data Lake: es una tabla append-only más un bucket, que nadie consulta analíticamente. Dos decisiones que obliga: **retención acotada** (~90 días) y **el acceso más restringido de todo el sistema**, porque es la única capa con el texto sin anonimizar.
+
+**Almacenamiento operacional.** Las 8 tablas actuales, sin cambio de naturaleza. Absorbe todas las adiciones del punto 11 (`metadatos_canal`, `metadatos_generacion`, `respuestas.fecha`, `comentario`, derivación explícita en `ticket_logs`, `adjuntos`/`transcripciones`, `parametros`, `outbox_eventos`) más el índice FTS, que conviene mantener dentro de esta capa: se calcula desde la misma fila, es transaccionalmente consistente y no requiere anonimizar.
+
+**Datos procesados.** Transcripción → anonimización → curación de elegibilidad. El orden es la clave: **la capa de IA nunca ve el texto identificable**, y eso es una frontera del flujo, no una política que la aplicación deba recordar aplicar.
+
+**Datos preparados para IA.** `ia.corpus_casos` (anonimizado y curado) y `ia.consultas_embeddings` (vector + metadatos corregidos en 11.3), en un esquema propio y desactivable.
+
+**Almacenamiento analítico.** Esquema `analitico` con **vistas materializadas** refrescadas por planificador, no un motor separado. Se materializa porque la consulta de tiempo promedio de resolución agrupa `ticket_logs` completa con dos `FILTER` y un JOIN a una vista que resuelve un `LATERAL` por ticket: su costo crece con el histórico, no con el volumen del día. Y `ticket_logs` es la tabla de mayor crecimiento del modelo (~3 filas por ticket, más una por cada derivación y reapertura). Un supervisor mirando un tablero no necesita el dato al segundo: **aceptar consistencia eventual aquí es gratis**, la misma decisión que 6.3 ya tomó para el índice vectorial. Excepción: "temas más consultados" no se puede materializar con SQL porque requiere agrupar por significado — vive en la capa de IA y es la única dependencia real del tablero respecto del componente vectorial.
+
+**Componentes de consulta.** Vistas y API SQL sobre el operacional (`vw_estado_actual_tickets` ya cumple ese rol); búsqueda léxica FTS; consultas analíticas; y el **servicio de recuperación**, que genera candidatos combinando FTS y ANN, los fusiona, filtra duro por permisos/estado/vigencia/recencia, re-rankea blando por canal/origen/calificación, aplica umbral y —si nada lo supera— **no sugiere y deriva a un humano**. Dos decisiones: la recuperación es **híbrida y no puramente vectorial** (el FTS acierta donde el vocabulario coincide, el vector donde hay sinonimia, y el servicio funciona en modo solo-léxico si la capa vectorial no existe todavía); y el umbral vive en el servicio, no en el consumidor, porque delegarlo garantiza que alguna aplicación termine mostrando el mejor de los malos resultados.
+
+**Consumidores y accesos.** Portal del cliente, consola del operador, panel del supervisor, consola de administración, servicio de sugerencia, worker de procesamiento y planificador analítico — cada uno con su rol de PostgreSQL y su alcance de RLS. El renglón crítico: **el servicio de IA no tiene hoy identidad de base de datos** (`roles` tiene 3 filas y modela roles de empleado, que es otra cosa que las identidades del motor), y arquitectónicamente **debe consultar con la identidad del usuario que originó la consulta**, no con una identidad de servicio con acceso total. Si consulta como servicio, la RLS del operacional queda intacta y perfectamente inútil, porque el contenido sale por el costado semántico: es la "puerta lateral" del punto 1 expresada como requisito de arquitectura.
+
+#### 12.4 Consistencia y reconstruibilidad
+
+**Solo dos capas son autoritativas** (crudo y operacional) y **solo una es irremplazable** (operacional): todo lo demás se regenera con un script, así que un respaldo del núcleo más el código de los workers reconstruye el 100% del sistema aguas abajo. La consistencia eventual queda **confinada a lo derivado**: ningún dato que alimente una decisión operativa (estado del ticket, quién lo atiende, calificación) es eventualmente consistente. Todo proceso del flujo debe ser idempotente (`hash_contenido`, `UNIQUE (id_consulta)`) y **reconciliable** por un job periódico que compare el corpus contra el estado transaccional: los triggers fallan y los workers se caen, y una arquitectura que solo confía en el evento acumula deriva silenciosa.
+
+#### 12.5 Justificación del enfoque
+
+| Enfoque | ¿Aplica? |
+|---|---|
+| **Simple monolítica** | **Insuficiente.** No tiene dónde retener un mensaje sin cliente identificado, ni dónde anonimizar antes de vectorizar, ni cómo evitar recalcular los indicadores más costosos sobre el histórico en cada tablero |
+| **Por capas en un motor** | **Adoptada** |
+| **Data Warehouse** | **No.** Resuelve integrar fuentes heterogéneas (hay **una**), aislar cargas analíticas que degraden el OLTP (no a este volumen, y la respuesta barata sería una réplica de lectura) e historizar cambios (ya resuelto por `ticket_logs`). Costo real: una copia de los datos personales, un ETL que mantener y **un segundo modelo de permisos donde el aislamiento por cliente puede perderse sin que nadie lo note** |
+| **Data Lake** | **No.** Los únicos datos no tabulares del caso son adjuntos y audio, que hoy no existen en el modelo y cuando existan serán binarios con puntero. Sería un bucket vacío con un catálogo que nadie consulta — y en este dominio, el lugar donde los datos personales se acumulan sin dueño ni retención: R1 amplificado |
+| **Lakehouse** | **No.** Resuelve un problema derivado de tener un lake |
+| **Motor vectorial dedicado** | **No a esta escala**, coherente con 7.3. Se mantiene como opción de evolución |
+
+**Arquitectura por capas lógicas dentro de un único PostgreSQL**, implementadas como esquemas —`crudo`, `public` (fuente de verdad, existe hoy), `ia`, `analitico`— más un bucket de objetos para binarios cuando esas fuentes se incorporen. El argumento decisivo es el mismo con que 7.2 eligió pgvector sobre una base vectorial dedicada: **un solo modelo de permisos**. Cada motor adicional es un lugar más donde el aislamiento por cliente puede estar mal configurado, y en un sistema que guarda DNI y direcciones ese es el riesgo dominante, no el rendimiento. A eso se suma que las transiciones entre capas pueden ser transaccionales (el outbox), que `REVOKE` sobre un esquema da el aislamiento en una línea de DDL, y que se puede construir por partes — que dado que hoy solo existe `public`, no es una ventaja teórica sino la única forma de que el plan sea ejecutable.
+
+#### 12.6 Etapas de implementación
+
+| Etapa | Contenido | Habilita |
+|---:|---|---|
+| **1** | Roles de PostgreSQL + RLS sobre las 8 tablas; `respuestas.fecha`; `parametros` | Todo lo demás. **Hoy falta y bloquea el resto**: sin identidades no hay a quién aplicarle una política, y sin fecha no hay recencia |
+| **2** | Esquema `analitico` + vistas materializadas + planificador | Tableros sin recalcular sobre el histórico |
+| **3** | FTS; esquema `crudo`; adaptadores; outbox + worker; **auto-cierre de tickets** | Ingesta real, búsqueda léxica y el reloj que hace crecer el corpus |
+| **4** | Anonimización; curación; `ia.corpus_casos`; `pgvector` + embeddings; servicio de recuperación híbrido | Sugerencia de respuestas y temas frecuentes |
+
+La etapa 4 da la funcionalidad más vistosa del enunciado y es deliberadamente la **última**, porque depende de un corpus que hoy tiene 2 casos elegibles y de un proceso de cierre inexistente.
+
+#### 12.7 Conclusión del punto
+
+**El caso requiere una arquitectura por capas: no una arquitectura simple, y tampoco un Data Warehouse, un Data Lake ni un Lakehouse.** No simple, porque hay cuatro necesidades que un esquema plano no cubre: retener un mensaje cuyo cliente aún no se identificó sin violar `NOT NULL`; anonimizar antes de vectorizar como frontera del flujo; dejar de recalcular los indicadores costosos en cada tablero; y separar con permisos distintos el contenido identificable del apto para IA. Y no los tres enfoques de gran escala, porque el caso tiene una sola fuente de verdad, volumen bajo a mediano, historización ya resuelta por `ticket_logs` y datos casi enteramente tabulares: resolverían problemas que no se presentan y multiplicarían los lugares donde viven los datos personales, que es el riesgo dominante del sistema.
+
+**Dos hallazgos que el análisis del flujo agrega y el modelo estático no muestra:**
+
+1. **Con el criterio de indexación corregido en 11.3, el corpus elegible hoy es de 2 casos de 10 tickets** (los tickets 2 y 10) —y de 1 si se exige validación humana, porque el del ticket 2 tiene respuesta final de IA. La causa: **solo 3 tickets llegan a `cerrado`** y uno de ellos (el 7) está dado de baja, mientras **5 quedan detenidos en `resuelto`** sin que exista proceso alguno que los cierre. Falta una regla de **auto-cierre**, que es a la vez una regla de negocio ausente y el reloj que hace crecer la capa de IA. Sin ella, esa capa nunca se llena.
+2. **"Respuesta final" no implica "reutilizable".** La respuesta final del ticket 4 —*"El pedido sera entregado durante el dia de hoy"* (`id_respuesta` 6)— es correcta, humana, final y de un ticket activo, y sugerirla la semana que viene es directamente falso. Ningún filtro del punto 11 la detecta: no está desactualizada, no es de IA, no es intermedia. Es **específica del caso**, no conocimiento del dominio. Eso obliga a que la capa de procesado tenga un criterio de generalizabilidad, apoyado en una señal que hoy no existe (`respuestas.reutilizable`, marcada por el operador).
+
+**Consecuencia de ambos:** la capa de IA debe quedar **diseñada, implementable y desactivada**, y toda la arquitectura tiene que funcionar sin ella —el operador atiende, los indicadores se calculan, la búsqueda léxica responde. Esa propiedad es la que permite construir el diseño en cuatro etapas, empezando por la que hoy falta y bloquea a todas las demás: **las identidades de base de datos y la RLS**, citadas como mitigación central desde el punto 2 y sin una sola línea de código en el proyecto.
 
 ### 13. Estrategia de seguridad, permisos y aislamiento
 * **Control de accesos:** Matriz o definición de roles, usuarios y permisos.
