@@ -29,16 +29,16 @@ Un núcleo relacional (`clientes`, `empleados`, `roles`, `tickets`, `ticket_logs
 
 ## Datos principales identificados
 
-| Entidad | Contenido | Para qué se usa |
-|---|---|---|
-| Cliente | Identidad y contacto (DNI, email, teléfonos, dirección) | Abrir y validar un ticket |
-| Empleado / Rol | Datos del empleado y su rol (operador, supervisor, administrador) | Asignación, permisos, indicadores por operador |
-| Ticket | Cliente, empleado asignado, canal de origen, actividad | Unidad de caso que atraviesa todos los canales |
-| Historial de estados (`ticket_logs`) | Ticket, empleado, fecha, estado alcanzado | Auditoría y cálculo de tiempos de resolución |
-| Conversación | Ticket, fecha, calificación de satisfacción | Agrupa el intercambio y la evaluación del cliente |
-| Consulta | Conversación, texto de la pregunta | Unidad mínima sobre la que la IA busca casos similares |
-| Respuesta | Consulta, texto, origen (humano/IA), si es la final | Trazabilidad de qué se respondió y quién lo generó |
-| Índice semántico (`consultas_embeddings`, propuesto) | Pregunta y respuesta final vectorizadas, con metadatos | Búsqueda por similitud sin recalcular en cada consulta |
+| Entidad                                              | Contenido                                                         | Para qué se usa                                        |
+| ---------------------------------------------------- | ----------------------------------------------------------------- | ------------------------------------------------------ |
+| Cliente                                              | Identidad y contacto (DNI, email, teléfonos, dirección)           | Abrir y validar un ticket                              |
+| Empleado / Rol                                       | Datos del empleado y su rol (operador, supervisor, administrador) | Asignación, permisos, indicadores por operador         |
+| Ticket                                               | Cliente, empleado asignado, canal de origen, actividad            | Unidad de caso que atraviesa todos los canales         |
+| Historial de estados (`ticket_logs`)                 | Ticket, empleado, fecha, estado alcanzado                         | Auditoría y cálculo de tiempos de resolución           |
+| Conversación                                         | Ticket, fecha, calificación de satisfacción                       | Agrupa el intercambio y la evaluación del cliente      |
+| Consulta                                             | Conversación, texto de la pregunta                                | Unidad mínima sobre la que la IA busca casos similares |
+| Respuesta                                            | Consulta, texto, origen (humano/IA), si es la final               | Trazabilidad de qué se respondió y quién lo generó     |
+| Índice semántico (`consultas_embeddings`, propuesto) | Pregunta y respuesta final vectorizadas, con metadatos            | Búsqueda por similitud sin recalcular en cada consulta |
 
 Detalle completo del relevamiento y de los riesgos identificados (R1-R8) en `docs/informe.md`, puntos 1 y 2.
 
@@ -119,6 +119,3 @@ Las 3 restantes del archivo (historial completo de un ticket, tiempo promedio de
 ## Limitaciones y posibles mejoras
 
 - **El componente vectorial está completamente diseñado (`vectorial/modelo_vectorial.md`) pero no activado.** El diseño ya resuelve RLS (columnas propias `id_cliente`/`id_ticket`, puntos 6.3b y 13), trazabilidad IA/humano, vigencia sin `DELETE` físico y reindexación idempotente — pero la tabla `consultas_embeddings` todavía no existe físicamente. Aunque existiera, con el criterio de indexación correcto el corpus de casos elegibles hoy es de 2 sobre 10 tickets: no hay volumen para que aporte valor. Falta, además, una regla de **auto-cierre** de tickets (`resuelto` sin reapertura durante N días → `cerrado`) sin la cual el corpus no tiene forma de crecer.
-- **De la primera etapa de implementación** (identidades y RLS, ya construidas y probadas) **queda pendiente** `respuestas.fecha` y una tabla `parametros` para los parámetros del sistema (umbral de similitud, cantidad de sugerencias). Punto 12.
-- **Búsqueda léxica (FTS) todavía no implementada.** Se identificó como más barata y adecuada que el componente vectorial para el caso general, y debería construirse antes que este.
-- **El diagrama conceptual** (`db/conceptual/conceptual_v2.0.png`) tiene un nombre de columna desactualizado (`texto_pregunta` en vez de `pregunta`, ya corregido en `restricciones.md`); no hay archivo fuente editable en el repo, así que requiere rehacerse en la herramienta original.
