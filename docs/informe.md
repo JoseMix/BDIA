@@ -232,7 +232,7 @@ El archivo `db/fisico/04_validaciones.sql` comprueba automáticamente:
 Cada prueba informa un mensaje `OK` cuando PostgreSQL rechaza o procesa el caso de la forma esperada. Como el script completo finaliza con `ROLLBACK`, los registros temporales utilizados en las pruebas no permanecen almacenados.
 
 ### 10. Consultas representativas
-Breve explicación de la utilidad de cada una de las 5 consultas mínimas requeridas, adjuntando el código correspondiente:
+Breve explicación de la utilidad de cada una de las 5 consultas mínimas requeridas, adjuntando el código correspondiente. `db/consultas/05_consultas_representativas.sql` tiene 8 consultas numeradas 1 a 8; estas 5 son la 1, 3, 7, 8 y 4 de ese archivo, en ese orden, elegidas para cubrir las cinco categorías que pide la consigna:
 1. **Consulta 1 (Selección y filtrado):** ¿Qué tickets tiene pendiente cierto operador? Muestra los trabajos que todavía tiene por terminar el operador.
 
 ```sql
@@ -297,7 +297,7 @@ ORDER BY tickets_pendientes DESC, operador;
 SELECT canal_origen, estado_actual, COUNT(*) AS cantidad_tickets 
 FROM vw_estado_actual_tickets 
 WHERE activo = TRUE 
-GROUP BY canal_origen, estado_actual0
+GROUP BY canal_origen, estado_actual
 ORDER BY canal_origen, cantidad_tickets DESC;
 ```
 
@@ -335,13 +335,13 @@ JSONB se justifica **solo donde la variabilidad de esquema es real**, no como es
 
 **Por qué la búsqueda tradicional no alcanza:** es un límite de expresividad, no de rendimiento. El FTS nativo (`tsvector` + GIN, config `spanish`, con `unaccent`) es exacto, barato y **debería implementarse igual, antes que los vectores**; pero no resuelve **sinonimia ni paráfrasis**, que es el problema real (*"clave"* y *"contraseña"* no comparten lexema). La prueba está en los datos del proyecto: la consulta 1 (*"Como puedo restablecer mi contrasena?"*) y la consulta 11 (*"No puedo ingresar a la aplicacion movil"*, respondida con *"actualizar la aplicacion y restablecer la contraseña"*) son el mismo problema y **no comparten una sola palabra de contenido**.
 
-**Metadatos que deben acompañar al vector.** El diseño de `vectorial/modelo_vectorial.md` se suscribe en su estructura general, con nueve correcciones. Las tres decisivas:
+**Metadatos que acompañan al vector.** El diseño de `vectorial/modelo_vectorial.md` incorpora, además de la referencia a `id_consulta`/`id_respuesta`, las columnas que la RLS y la trazabilidad del componente necesitan. Las tres decisivas:
 
-1. **Faltan `id_cliente` e `id_ticket`.** Sin ellos, la RLS que ese documento declara **no es implementable** sin el JOIN a `consultas → conversaciones → tickets` que la desnormalización existía para evitar.
-2. **Falta `es_humano` de la respuesta final.** En los datos de ejemplo **3 de las 10 respuestas finales son puramente de IA** (`id_respuesta` 3, 12, 17): indexarlas sin marca hace que el sistema se alimente de su propia salida, que es R4 sin mitigación efectiva.
-3. **Falta la fecha del caso** — y no es derivable de forma barata, porque **ni `consultas` ni `respuestas` tienen columna de fecha**. La recencia es el filtro más importante: una resolución vieja puede ser hoy incorrecta aunque siga siendo la más parecida.
+1. **`id_cliente` e `id_ticket`.** Sin ellos, la RLS que ese documento declara no sería implementable sin el JOIN a `consultas → conversaciones → tickets` que la desnormalización existe para evitar.
+2. **`es_humano` de la respuesta final.** En los datos de ejemplo **3 de las 10 respuestas finales son puramente de IA** (`id_respuesta` 3, 12, 17): indexarlas sin marca haría que el sistema se alimente de su propia salida, que es R4 sin mitigación efectiva.
+3. **`fecha_resolucion`** — necesaria porque no es derivable de forma barata desde el núcleo: **ni `consultas` ni `respuestas` tienen columna de fecha propia**. La recencia es el filtro más importante: una resolución vieja puede ser hoy incorrecta aunque siga siendo la más parecida.
 
-Las otras seis: agregar `hash_contenido` y `vigente`; agregar `UNIQUE (id_consulta)` (sin él la reindexación duplica filas e infla los conteos de "consultas frecuentes"); convertir el filtro por canal en re-ranking blando en lugar de `WHERE canal_origen = ...`, que parte el corpus en cinco por una razón irrelevante al contenido; reemplazar el `GROUP BY contenido_pregunta` de la segunda consulta, que **cuenta duplicados literales y no similares**, por clustering o conteo de vecinos por radio; diferir el índice HNSW, que es aproximado y con 10 filas rinde peor que el scan exacto; y exigir **umbral de distancia** en toda consulta, porque sin él la búsqueda siempre devuelve *k* resultados aunque ninguno sirva.
+Las otras seis, también incorporadas: `hash_contenido` y `vigente` para reindexar sin duplicar y retirar un caso sin `DELETE`; `UNIQUE (id_consulta)` para que la reindexación no duplique filas ni infle los conteos de "consultas frecuentes"; el filtro por canal como re-ranking blando en lugar de `WHERE canal_origen = ...`, que partiría el corpus en cinco por una razón irrelevante al contenido; el reemplazo del `GROUP BY contenido_pregunta` de la segunda consulta —que contaba duplicados literales y no similares— por conteo de vecinos por radio; el índice HNSW diferido, porque es aproximado y con un corpus chico rinde peor que el scan exacto; y el umbral de distancia obligatorio en toda consulta, porque sin él la búsqueda siempre devuelve *k* resultados aunque ninguno sirva.
 
 **Corrección del criterio de indexación, con evidencia en los datos de ejemplo.** Indexar por `es_respuesta_final = TRUE` sin mirar el estado del ticket es insuficiente en dos sentidos verificables:
 
@@ -352,7 +352,7 @@ Las otras seis: agregar `hash_contenido` y `vigente`; agregar `UNIQUE (id_consul
 
 - **Desactualización silenciosa.** R3 cubre el caso en que el texto cambia. No cubre el caso en que **el texto no cambia y el mundo sí**: *"Se aceptan tarjetas de credito, debito y transferencia bancaria"* (respuesta 12) sigue idéntica cuando la empresa deja de aceptar transferencias, y **ningún trigger lo detecta porque no hubo `UPDATE`**. Solo lo mitigan la ventana de recencia y la revisión periódica. Riesgo abierto.
 - **Falsos positivos plausibles.** Las consultas 9 (*"Que medios de pago aceptan?"*) y 10 (*"Puedo pagar la compra en cuotas?"*) son vecinas muy cercanas con respuestas **no intercambiables**. La negación agrava el problema: *"puedo cancelar"* y *"no puedo cancelar"* son casi idénticos como vectores y opuestos como intención.
-- **Autorización.** `roles` tiene 3 filas (Operador, Supervisor, Administrador): **no existe identidad de base de datos para el "Sistema de IA"** que la sección 1 describe como usuario con permisos propios, ni hay un solo `CREATE POLICY` en los scripts. Hoy la IA consultaría con las credenciales de la aplicación, es decir con acceso a todo el corpus — exactamente la "puerta lateral" que la sección 1 advierte.
+- **Autorización.** `roles` tiene **3 filas: Operador, Supervisor, Administrador**, y modela roles de negocio de empleados, no identidades de motor. La identidad de base de datos para el "Sistema de IA" que la sección 1 describe como usuario con permisos propios vive en `db/fisico/05_seguridad_permisos.sql` (`rol_sistema_ia`, sección 13): solo puede insertar sugerencias (`es_humano = false`) y no tiene lectura propia amplia — la recuperación corre con el rol de quien pregunta, que es exactamente "las mismas restricciones de acceso que aplican al usuario que dispara la consulta" que pide la sección 1, y evita la "puerta lateral" que advierte. Lo que falta es acotado: `consultas_embeddings` no existe físicamente todavía — el diseño ya especifica columnas propias `id_cliente`/`id_ticket` para que, cuando se cree, se le pueda aplicar la misma RLS sin reintroducir el JOIN que la desnormalización busca evitar (`vectorial/modelo_vectorial.md`, sección 13).
 - **Privacidad.** La anonimización debe ocurrir **antes de calcular el embedding**, como ya indica R2, porque el vector conserva información del texto original y existen ataques de inversión. Además queda una tensión abierta: `clientes.activo = FALSE` se documenta como "anonimización de datos personales", pero **nada anonimiza el texto de sus consultas ya indexadas**.
 - **Pérdida de contexto.** La consulta 12 (*"Cuanto tiempo dura el enlace para cambiar la contrasena?"*) solo se entiende leída después de la consulta 1 de su misma conversación; indexada suelta es un fragmento huérfano.
 - **Volumen.** Con 10 pares indexables el componente es **demostrativo, no útil**: su valor aparece a partir de algunos cientos de casos cerrados.
@@ -371,7 +371,7 @@ No se justifica, en cambio, una base vectorial dedicada (`pgvector` en el mismo 
 
 #### 12.1 Punto de partida
 
-De las nueve capas que la arquitectura contempla, **hoy existe una**: la operacional (8 tablas, 9 índices, 1 vista). No hay ingesta, ni datos crudos, ni capa de procesamiento, ni almacenamiento analítico como tal —los indicadores se calculan en caliente con las consultas de `db/consultas/`—, ni la tabla de embeddings, ni consumidores (no hay código de aplicación), ni control de acceso (ni un `CREATE ROLE` ni un `CREATE POLICY` en todo el proyecto). Por eso el criterio rector es que **cada capa se pueda incorporar por separado y el sistema funcione sin las que faltan**.
+De las nueve capas que la arquitectura contempla, **hoy existe una**: la operacional (8 tablas, 9 índices, 1 vista), con roles de PostgreSQL y RLS ya implementados y probados sobre ella (`db/fisico/05_seguridad_permisos.sql`, sección 13). No hay ingesta, ni datos crudos, ni capa de procesamiento, ni almacenamiento analítico como tal —los indicadores se calculan en caliente con las consultas de `db/consultas/`—, ni la tabla de embeddings, ni consumidores (no hay código de aplicación). Por eso el criterio rector es que **cada capa se pueda incorporar por separado y el sistema funcione sin las que faltan**.
 
 Tres reglas gobiernan el diseño: una sola fuente de verdad (el núcleo relacional; todo lo demás es derivado y reconstruible); ninguna capa derivada es indispensable para atender un caso; y el dato personal se degrada al avanzar (identificable en el crudo, con RLS en el operacional, **anonimizado antes de entrar a la capa de IA**).
 
@@ -471,7 +471,7 @@ El dato entra por un canal, se guarda crudo para poder reprocesarlo, se normaliz
 
 **Componentes de consulta.** Vistas y API SQL sobre el operacional (`vw_estado_actual_tickets` ya cumple ese rol); búsqueda léxica FTS; consultas analíticas; y el **servicio de recuperación**, que genera candidatos combinando FTS y ANN, los fusiona, filtra duro por permisos/estado/vigencia/recencia, re-rankea blando por canal/origen/calificación, aplica umbral y —si nada lo supera— **no sugiere y deriva a un humano**. Dos decisiones: la recuperación es **híbrida y no puramente vectorial** (el FTS acierta donde el vocabulario coincide, el vector donde hay sinonimia, y el servicio funciona en modo solo-léxico si la capa vectorial no existe todavía); y el umbral vive en el servicio, no en el consumidor, porque delegarlo garantiza que alguna aplicación termine mostrando el mejor de los malos resultados.
 
-**Consumidores y accesos.** Portal del cliente, consola del operador, panel del supervisor, consola de administración, servicio de sugerencia, worker de procesamiento y planificador analítico — cada uno con su rol de PostgreSQL y su alcance de RLS. El renglón crítico: **el servicio de IA no tiene hoy identidad de base de datos** (`roles` tiene 3 filas y modela roles de empleado, que es otra cosa que las identidades del motor), y arquitectónicamente **debe consultar con la identidad del usuario que originó la consulta**, no con una identidad de servicio con acceso total. Si consulta como servicio, la RLS del operacional queda intacta y perfectamente inútil, porque el contenido sale por el costado semántico: es la "puerta lateral" del punto 1 expresada como requisito de arquitectura.
+**Consumidores y accesos.** Portal del cliente, consola del operador, panel del supervisor, consola de administración, servicio de sugerencia, worker de procesamiento y planificador analítico — cada uno con su rol de PostgreSQL y su alcance de RLS. El renglón crítico: arquitectónicamente el servicio de IA **debe consultar con la identidad del usuario que originó la consulta**, no con una identidad de servicio con acceso total — si consulta como servicio, la RLS del operacional queda intacta y perfectamente inútil, porque el contenido sale por el costado semántico. Es la "puerta lateral" del punto 1 expresada como requisito de arquitectura, y es exactamente el criterio que sigue `rol_sistema_ia` (`db/fisico/05_seguridad_permisos.sql`, sección 13): solo inserta sugerencias, sin lectura propia amplia.
 
 #### 12.4 Consistencia y reconstruibilidad
 
@@ -494,7 +494,7 @@ El dato entra por un canal, se guarda crudo para poder reprocesarlo, se normaliz
 
 | Etapa | Contenido | Habilita |
 |---:|---|---|
-| **1** | Roles de PostgreSQL + RLS sobre las 8 tablas; `respuestas.fecha`; `parametros` | Todo lo demás. **Hoy falta y bloquea el resto**: sin identidades no hay a quién aplicarle una política, y sin fecha no hay recencia |
+| **1** | `respuestas.fecha`; `parametros` (roles de PostgreSQL y RLS sobre las 8 tablas del núcleo ya implementados y probados, `db/fisico/05_seguridad_permisos.sql`, sección 13) | Todo lo demás. Falta la fecha para tener recencia |
 | **2** | Esquema `analitico` + vistas materializadas + planificador | Tableros sin recalcular sobre el histórico |
 | **3** | FTS; esquema `crudo`; adaptadores; outbox + worker; **auto-cierre de tickets** | Ingesta real, búsqueda léxica y el reloj que hace crecer el corpus |
 | **4** | Anonimización; curación; `ia.corpus_casos`; `pgvector` + embeddings; servicio de recuperación híbrido | Sugerencia de respuestas y temas frecuentes |
@@ -510,16 +510,146 @@ La etapa 4 da la funcionalidad más vistosa del enunciado y es deliberadamente l
 1. **Con el criterio de indexación corregido en 11.3, el corpus elegible hoy es de 2 casos de 10 tickets** (los tickets 2 y 10) —y de 1 si se exige validación humana, porque el del ticket 2 tiene respuesta final de IA. La causa: **solo 3 tickets llegan a `cerrado`** y uno de ellos (el 7) está dado de baja, mientras **5 quedan detenidos en `resuelto`** sin que exista proceso alguno que los cierre. Falta una regla de **auto-cierre**, que es a la vez una regla de negocio ausente y el reloj que hace crecer la capa de IA. Sin ella, esa capa nunca se llena.
 2. **"Respuesta final" no implica "reutilizable".** La respuesta final del ticket 4 —*"El pedido sera entregado durante el dia de hoy"* (`id_respuesta` 6)— es correcta, humana, final y de un ticket activo, y sugerirla la semana que viene es directamente falso. Ningún filtro del punto 11 la detecta: no está desactualizada, no es de IA, no es intermedia. Es **específica del caso**, no conocimiento del dominio. Eso obliga a que la capa de procesado tenga un criterio de generalizabilidad, apoyado en una señal que hoy no existe (`respuestas.reutilizable`, marcada por el operador).
 
-**Consecuencia de ambos:** la capa de IA debe quedar **diseñada, implementable y desactivada**, y toda la arquitectura tiene que funcionar sin ella —el operador atiende, los indicadores se calculan, la búsqueda léxica responde. Esa propiedad es la que permite construir el diseño en cuatro etapas, empezando por la que hoy falta y bloquea a todas las demás: **las identidades de base de datos y la RLS**, citadas como mitigación central desde el punto 2 y sin una sola línea de código en el proyecto.
+**Consecuencia de ambos:** la capa de IA debe quedar **diseñada, implementable y desactivada**, y toda la arquitectura tiene que funcionar sin ella —el operador atiende, los indicadores se calculan, la búsqueda léxica responde. Esa propiedad es la que permite construir el diseño en cuatro etapas, empezando por **las identidades de base de datos y la RLS**, citadas como mitigación central desde el punto 2 y ya implementadas y probadas contra Postgres real en `db/fisico/05_seguridad_permisos.sql` (sección 13); lo que queda pendiente de esa primera etapa es `respuestas.fecha` y `parametros`.
 
 ### 13. Estrategia de seguridad, permisos y aislamiento
-* **Control de accesos:** Matriz o definición de roles, usuarios y permisos.
-* **Mecanismos de aislamiento:** Explicación técnica de cómo garantizar el aislamiento entre tenants, empresas o usuarios según el caso.
-* **Mitigación de riesgos en IA:** Estrategia para evitar la exposición indebida de datos sensibles a través de interfaces de lenguaje natural o asistentes inteligentes.
+
+
+* **Tipos de usuarios y roles.** El dominio no es multi-tenant (una sola empresa), por lo que el aislamiento relevante es entre clientes entre sí y entre roles internos. Se identifican los mismos cinco actores ya descritos en el punto 1 del informe — cuatro humanos más el propio sistema de IA como actor con permisos diferenciados:
+  - **Cliente:** no es un empleado (no tiene fila en `roles`); se identifica por su propio registro en `clientes`.
+  - **Operador**, **Supervisor**, **Administrador:** son los tres valores de `roles.descripcion` para empleados (`empleados.id_rol`).
+  - **Sistema de IA:** actor sin fila propia en `empleados`; opera dentro de la sesión del usuario humano que dispara la consulta (mismas restricciones que ese usuario) y, para sugerir respuestas, solo lee de `consultas_embeddings` — tabla que por diseño excluye consultas no resueltas o respuestas no marcadas como `es_respuesta_final` (`vectorial/modelo_vectorial.md`, punto 1). Esto es la mitigación directa al riesgo **R2** ya identificado en el punto 2 del informe ("fuga de datos sensibles por vía semántica") y a la advertencia del punto 1 sobre la IA como "puerta lateral" que podría saltear el control de acceso relacional.
+
+* **Control de accesos — matriz de permisos por tabla:**
+
+  | Tabla | Cliente | Operador | Supervisor | Administrador |
+  |---|---|---|---|---|
+  | `clientes` | Lee/actualiza su propio registro (`id_cliente`) | Lee datos de contacto del cliente del ticket asignado (nombre, apellido, email, teléfono principal); no ve `dni` ni `direccion` (ver más abajo) | Lee todos | CRUD completo; único rol que puede setear `activo = false` |
+  | `tickets` | Crea los propios; lee solo donde `id_cliente` es el suyo | Lee/actualiza donde `id_empleado` es el suyo | Lee y reasigna todos | CRUD completo |
+  | `ticket_logs` | Lee el historial de sus propios tickets (solo lectura, vía join a `tickets`) | Inserta una fila al cambiar el estado de un ticket propio; nunca actualiza ni borra (la tabla es append-only por diseño) | Lee todo | Lee todo; no se habilita `UPDATE`/`DELETE` para nadie, ni siquiera admin, para no romper la auditoría |
+  | `conversaciones`, `consultas` | Crea consultas, califica la conversación al cierre (`calificacion`) y lee sus propias conversaciones (vía `tickets.id_cliente`) | Lee/responde las de sus tickets asignados | Lee todas (uso analítico) | CRUD completo |
+  | `respuestas` | Lee las respuestas de sus consultas | Inserta/edita respuestas humanas (`es_humano = true`) de sus tickets; lee las sugerencias de IA | Lee todas | CRUD completo |
+  | `empleados`, `roles` | Sin acceso | Lee su propio registro | Lee toda la nómina (simplificación: el esquema físico no modela "equipo" — no hay relación supervisor↔operador, solo `id_rol`) | CRUD completo |
+  | `consultas_embeddings` | Sin acceso directo | Lectura acotada a los embeddings de sus tickets, filtrando por columnas propias `id_cliente`/`id_ticket` (detalle más abajo) | Lectura amplia (analítico) | CRUD; reindexación |
+
+* **Datos sensibles identificados** (complementa el relevamiento de riesgos del punto 2): PII de `clientes` — `dni`, `email`, `telefono_1`, `telefono_2`, `direccion`; el texto libre de `consultas.pregunta` y `respuestas.texto_respuesta`, que puede contener datos personales pegados por el cliente (riesgo **R2**); `conversaciones.calificacion` combinada con el resto del caso, que perfila el desempeño de un operador puntual (riesgo **R8**).
+
+* **Mecanismos de aislamiento — implementados en `db/fisico/05_seguridad_permisos.sql`.** Se combinan tres mecanismos: roles nativos de PostgreSQL, Row Level Security (aislamiento por fila) y `GRANT` a nivel de columna (ocultar PII completa a quien no la necesita). Los índices que ya existen en `db/fisico/02_indices_vistas.sql` (`idx_tickets_id_cliente`, `idx_tickets_empleado_activos`) hacen baratas estas políticas, porque filtran por las mismas columnas. Extracto representativo (el script completo cubre las 8 tablas del núcleo):
+
+  ```sql
+  -- Roles NOLOGIN: el backend hace SET ROLE al que corresponda tras
+  -- autenticar al usuario, dentro de la misma transacción del pedido.
+  CREATE ROLE rol_app_cliente NOLOGIN;
+  CREATE ROLE rol_operador NOLOGIN;
+  CREATE ROLE rol_supervisor NOLOGIN;
+  CREATE ROLE rol_administrador NOLOGIN;
+
+  ALTER TABLE tickets ENABLE ROW LEVEL SECURITY;
+
+  -- current_setting(..., true) — segundo argumento missing_ok — para que
+  -- una sesión sin autenticar DENIEGUE (0 filas) en vez de romper con
+  -- "unrecognized configuration parameter". Verificado empíricamente:
+  -- sin el "true" esto lanza error en una conexión que nunca hizo SET.
+  CREATE POLICY cliente_ve_sus_tickets ON tickets
+    FOR SELECT
+    TO rol_app_cliente
+    USING (id_cliente = current_setting('app.current_cliente_id', true)::int);
+
+  CREATE POLICY operador_ve_asignados ON tickets
+    FOR SELECT
+    TO rol_operador
+    USING (id_empleado = current_setting('app.current_empleado_id', true)::int);
+
+  -- Una vez habilitado RLS, cualquier rol SIN policy propia ve 0 filas
+  -- (no "todo"): supervisor y administrador necesitan su propia policy
+  -- explícita para ver todo, no alcanza con "no restringirlos".
+  CREATE POLICY supervisor_admin_ven_todo_tickets ON tickets
+    FOR SELECT
+    TO rol_supervisor, rol_administrador
+    USING (true);
+
+  -- El mismo criterio se propaga a conversaciones/consultas/respuestas
+  -- vía subquery sobre tickets, para no duplicar la condición de
+  -- aislamiento (ver script completo).
+  --
+  -- consultas_embeddings es la única excepción a ese patrón de subquery:
+  -- el motivo de desnormalizar esa tabla (6.3b) es evitar un JOIN contra
+  -- el núcleo en el camino caliente de la búsqueda por similitud, así
+  -- que su policy no puede reintroducirlo. Por eso lleva columnas
+  -- propias id_cliente/id_ticket (duplicadas, igual que
+  -- contenido_pregunta/contenido_respuesta), y su policy es una
+  -- comparación de igualdad indexada, no un JOIN:
+  --   USING (id_cliente = current_setting('app.current_cliente_id', true)::int)
+  -- Pendiente hasta que la tabla se cree físicamente (no existe hoy).
+
+  -- Columnas de PII de clientes ocultas para el operador: nombre,
+  -- apellido, email y teléfono principal alcanzan para personalizar y
+  -- responder por cualquier canal; dni, dirección y teléfono
+  -- alternativo no son necesarios para resolver un caso.
+  GRANT SELECT (id_cliente, nombre, apellido, email, telefono_1)
+      ON clientes TO rol_operador;
+  ```
+
+  Dos correcciones que solo aparecieron al ejecutarlo contra un Postgres real (no se ven leyendo el SQL): **(1)** `security_invoker = true` en `vw_estado_actual_tickets` no alcanza solo — también hace falta `GRANT SELECT` sobre la vista como objeto, o Postgres devuelve `permission denied for view` aunque el rol tenga acceso a las tablas base; **(2)** un `RESET` de la variable de sesión no la vuelve a dejar en "nunca seteada" (queda en `''`, que rompe el cast a `int`) — para producción, la recomendación es usar `SET LOCAL` (no `SET`) dentro de la transacción de cada pedido, para que revierta sola al hacer `COMMIT`/`ROLLBACK` sin depender de que el backend se acuerde de resetearla. Sin esto, una conexión reciclada por un pool podría heredar el `id_empleado` de un pedido anterior — el riesgo real que esta sección busca evitar. Detalle completo en los comentarios de `db/fisico/05_seguridad_permisos.sql`.
+
+* **Mitigación de riesgos de exposición indebida vía IA.** Además de que el "usuario" IA opera con los permisos de quien pregunta (punto anterior), `consultas_embeddings` solo indexa **casos resueltos y validados** (nunca respuestas intermedias o descartadas), lo que ya limita qué puede sugerirse. Falta, y se deja como pendiente de implementación, aplicar RLS sobre `consultas_embeddings` mediante sus propias columnas `id_cliente`/`id_ticket` (ver más arriba), tal como pide `vectorial/modelo_vectorial.md` en su punto 5 ("debe respetar la misma política de aislamiento... un operador o un cliente no deben poder recuperar, vía búsqueda semántica, el contenido de un caso al que no tendrían acceso por la vía relacional normal"). El filtro debe aplicarse **antes** de la búsqueda por similitud (a nivel `WHERE` de Postgres, no post-procesado en la aplicación), para que una fila fuera de alcance ni siquiera participe del `ORDER BY embedding <-> ...`.
+
+* **Auditoría.** `ticket_logs` ya es, por diseño, un registro append-only con `fecha` e `id_empleado` responsable (`db/logico/restricciones.md`), y ninguna tabla del núcleo admite `DELETE` físico (soft delete vía `activo`, mitigación ya documentada para el riesgo **R5**). Se propone extender el mismo criterio de "nunca sobrescribir, siempre agregar" a los accesos de lectura sobre datos sensibles de `clientes` que ocurran fuera del flujo normal de atención de un ticket (por ejemplo, una consulta de un supervisor sobre un cliente puntual sin ticket activo asociado), y reforzar que `respuestas.es_humano`/`es_respuesta_final` ya cubren la trazabilidad IA-vs-humano que pide la consigna.
+
+* **Implementado y probado — `db/fisico/05_seguridad_permisos.sql`.** El script es aditivo: no modifica `01_creacion_tablas.sql`, `02_indices_vistas.sql` ni `04_validaciones.sql` (la corrección de `security_invoker` sobre la vista es un `ALTER VIEW` dentro del script nuevo, no una edición del archivo de Fran). Se ejecutó de punta a punta contra una instancia real de PostgreSQL 18 — `01` → `02` → `03` (datos de ejemplo) → `05` — y se verificaron con `SET ROLE` + variables de sesión, entre otros: un operador solo ve sus 3 tickets asignados (vía tabla y vía la vista); un cliente solo ve sus propios tickets; supervisor ve los 10; una sesión sin autenticar ve 0 filas en lugar de romper; el operador no puede leer `clientes.dni`; nadie puede `UPDATE`/`DELETE` sobre `ticket_logs`; el rol de servicio de IA puede insertar sugerencias (`es_humano = false`) pero no puede insertar haciéndose pasar por humano, ni el operador puede responder consultas de tickets ajenos. Las 13 validaciones de `04_validaciones.sql` se corrieron después y siguen pasando sin cambios. No quedó nada corriendo: la instancia de prueba se creó y se destruyó por completo, no se tocó ningún servicio del entorno del usuario.
 
 ### 14. Consideraciones de escalabilidad y rendimiento
-* **Puntos críticos de crecimiento:** Identificación de las estructuras que experimentarán mayor incremento de volumen de datos o consultas.
-* **Estrategia de optimización:** Propuesta de índices necesarios, particionamiento de datos, precalculados o separación de componentes operacionales/analíticos.
+
+* **Puntos críticos de crecimiento.**
+
+  | Estructura | Por qué crece | Proporción de partida (datos de ejemplo) | Qué se rompe primero al escalar |
+  |---|---|---|---|
+  | `ticket_logs` | Append-only por diseño (nunca `UPDATE`/`DELETE`, sección 13): cada cambio de estado de cada ticket agrega una fila, para siempre | 31 filas / 10 tickets ≈ 3,1 por ticket | Es la única tabla del núcleo cuyo crecimiento no está acotado por cantidad de entidades, sino por entidades × eventos × tiempo. Con miles de tickets/mes sostenidos durante varios años sería la primera en llegar a varios millones de filas. No se rompe la lectura de un ticket puntual (el índice compuesto la mantiene barata a cualquier volumen) — se rompen las operaciones sobre la tabla completa: `VACUUM`/`ANALYZE`, backups, o un indicador histórico sin filtro de fecha |
+  | `conversaciones` / `consultas` / `respuestas` | Crecen con el volumen de interacción, acotadas por ticket pero no por el tiempo que ese ticket permanece abierto | 10 / 12 / 17 filas (~1,4 respuestas por consulta) | La Consulta 3 (`GROUP BY es_humano` sin ventana de tiempo sobre toda `respuestas`): un agregado sin filtro de fecha escala linealmente con el total histórico, no con la actividad reciente que un tablero de gestión realmente necesita |
+  | `clientes` / `empleados` / `tickets` | Acotadas por cantidad de entidades, pero **nunca se achican**: la baja es lógica (`activo = false`, sección 13), no `DELETE` físico | Volumen bajo hoy | Crecen más despacio que `ticket_logs` (sin el eje tiempo), pero un índice sobre estas tablas carga indefinidamente filas ya inactivas para el negocio — no hay purga que lo compense |
+  | `consultas_embeddings` (si se materializa) | Solo indexaría casos **cerrados y con respuesta final validada** (`vectorial/modelo_vectorial.md`, punto 1) | Corpus elegible hoy: 2 casos sobre 10 tickets (punto 11) | Si la funcionalidad de sugerencia de respuestas tiene éxito, este corpus crece con el mismo eje temporal que `ticket_logs` — y es ese crecimiento, no una fecha en el calendario, el que convierte al scan secuencial (hoy más exacto que `HNSW`, ver más abajo) en el cuello de botella |
+
+* **Estrategia de optimización.** Frente a cada punto crítico de la tabla anterior, la solución ya está en uno de dos estados: **construida**, o **decidida con un disparador concreto para construirla**. En ningún caso queda para pensar en el momento.
+
+  **Ya construido — decisiones tomadas antes de que hubiera un problema de escala real:**
+
+  - **Índices para lectura acotada (`db/fisico/02_indices_vistas.sql`).** Un índice por cada FK del camino caliente (`idx_tickets_id_cliente`, `idx_tickets_empleado_activos`, `idx_ticket_logs_ticket_fecha`, `idx_conversaciones_id_ticket`, `idx_consultas_id_conversacion`, `idx_respuestas_id_consulta`) ya garantiza que leer "los tickets de un cliente" o "el último estado de un ticket" sea una búsqueda logarítmica, no un recorrido completo, a cualquier volumen. La sección 13 ya señala que esto abarata las políticas RLS sobre `tickets`; vale extender la observación a `conversaciones`/`consultas`/`respuestas`, donde la policy filtra vía una subconsulta que hace `JOIN` hasta `tickets` (la de `consultas`, por ejemplo, recorre `conversaciones INNER JOIN tickets`) — esos mismos índices de navegación son los que sostienen esa cadena a escala, sin duplicar índices para seguridad y para performance por separado.
+
+  - **`tickets.id_empleado` desnormalizado (punto 6.3a).** No es una optimización pendiente: ya está en el esquema implementado, y se justificó específicamente para que "qué tickets tiene asignados un operador ahora" —la consulta más frecuente del sistema— nunca dependa de recalcular sobre `ticket_logs`, que es la tabla que más crece. Es preparación para escala decidida antes de que existiera un problema de escala.
+
+  - **Roles nativos + Row Level Security (`db/fisico/05_seguridad_permisos.sql`, sección 13).** El aislamiento por cliente/operador ya corre a nivel de motor, ejecutado y probado contra Postgres real. Cuando crezca la cantidad de usuarios no hay rediseño pendiente: es la misma implementación de hoy operando sobre más filas y más roles activos a la vez.
+
+  **Ya decidido — sin construir todavía, pero con umbral y mecanismo ya especificados, no a definir cuando el volumen aparezca:**
+
+  - **La separación del componente vectorial (punto 6.3b).** La decisión de diseño ya está tomada, y justificada específicamente por escala —que la búsqueda semántica no compita por I/O con la atención de tickets en curso—, aunque `consultas_embeddings` no exista todavía como tabla física (así lo dejan explícito los puntos 11, 12 y 13). Cuando se cree, nace ya separada; no es algo a decidir en el momento en que el volumen lo exija.
+
+  - **Dos índices con condición de activación ya definida:** si el planner no puede usar el único índice existente sobre `tickets.id_empleado` (`idx_tickets_empleado_activos`, parcial, `WHERE activo = TRUE`) para la policy `operador_ve_asignados` —que filtra sin esa condición— (conviene verificarlo con `EXPLAIN`), el reemplazo ya está identificado: un índice simple `idx_tickets_id_empleado`. Y un índice de texto completo (`tsvector` + `GIN`, `spanish` + `unaccent`) sobre `consultas.pregunta`/`respuestas.texto_respuesta` ya está propuesto por el punto 12 (etapa 3) para el momento en que exista búsqueda léxica por palabra clave, hoy inexistente.
+
+  - **Particionamiento de `ticket_logs` por rango de fecha**, para cuando las operaciones sobre la tabla completa (`VACUUM`, `ANALYZE`, backups, un indicador histórico sin filtro) empiecen a degradarse pese a los índices puntuales — es la única tabla que crece también en el eje tiempo (fila anterior). El mecanismo ya está especificado: particionamiento declarativo de PostgreSQL (`PARTITION BY RANGE (fecha)`, particiones mensuales o trimestrales), compatible con "nunca borrado físico" porque particionar no es eliminar.
+
+  - **Vista materializada para las consultas agregadas.** Las Consultas 3 y 5 (punto 10) recalculan sobre el histórico completo en cada ejecución, sin ventana de tiempo — el primer patrón en volverse costoso a medida que crece el total. El reemplazo ya está escrito, en el esquema `analitico` que propone el punto 12 (etapa 2), listo para crearse cuando el refresco periódico deje de ser prematuro:
+
+    ```sql
+    -- Propuesta, no implementada -- vive en el futuro esquema `analitico`
+    -- (punto 12, etapa 2), no en db/fisico/.
+    CREATE MATERIALIZED VIEW analitico.tickets_por_canal_y_estado AS
+    SELECT canal_origen, estado_actual, COUNT(*) AS cantidad_tickets
+    FROM vw_estado_actual_tickets
+    WHERE activo = TRUE
+    GROUP BY canal_origen, estado_actual;
+
+    -- Refresco periodico (planificador externo o pg_cron), no en
+    -- cada lectura del tablero:
+    REFRESH MATERIALIZED VIEW CONCURRENTLY analitico.tickets_por_canal_y_estado;
+    ```
+
+  - **Separación operacional/analítica**, incluidos los esquemas por capas del punto 12 (`analitico`, `ia`): ninguno existe todavía, pero el punto 12 ya fija tanto el disparador (consultas agregadas compitiendo por recursos con la operación) como la acción (réplica de lectura, no un Data Warehouse aparte — esa complejidad ya se descarta a esta escala en la sección 7.3).
+
+  - **`HNSW` sobre `consultas_embeddings`**, para cuando el corpus (que crece con el mismo eje temporal que `ticket_logs`, si la funcionalidad de sugerencia tiene éxito) deje de caber en un scan secuencial exacto. Hoy, con un corpus de dos dígitos, el scan secuencial no es solo suficiente: es *más exacto* que `HNSW`, que es un índice aproximado (punto 11) — construirlo ahora perdería precisión sin ganar velocidad. El umbral y el mecanismo ya están identificados; también una advertencia para cuando llegue: combinar `HNSW` con un filtro muy selectivo (un `WHERE id_cliente = ...` de RLS) puede devolver menos de *k* resultados, así que la estrategia ya decidida es filtrar primero y calcular distancia exacta sobre el subconjunto filtrado, no al revés.
+
+  - **Connection pooling para usuarios concurrentes.** Más clientes y operadores conectados a la vez agota conexiones de Postgres antes de que cualquier tabla se vuelva grande. El mecanismo estándar (pgbouncer o similar) ya tiene resuelta la parte que podría romperlo: la sección 13 ya identificó y verificó que hace falta `SET LOCAL`, no `SET`, para que una conexión reciclada entre pedidos de usuarios distintos no arrastre el `id_cliente`/`id_empleado` de un pedido anterior. Activar pooling no requiere resolver esa corrección en el momento; ya está resuelta.
+
+  La frontera entre lo ya construido y lo ya decidido no es arbitraria: la misma pregunta que ya justificó la elección de motor (punto 7) —el compromiso entre **simplicidad, rendimiento, consistencia y costo**— es la que la traza. Lo construido son piezas sin costo de mantenimiento propio ni sacrificio de consistencia: índices, una columna desnormalizada, roles y RLS que ya hacían falta por seguridad de todos modos. Lo decidido-pero-no-construido son piezas que, activadas hoy, agregarían infraestructura para pagar y operar (réplica, motor vectorial) o consistencia para sacrificar (vista materializada con refresco periódico, `HNSW` aproximado) sin que exista todavía volumen que lo justifique — la vista materializada queda desactualizada entre refrescos, la réplica tiene *lag*, el índice vectorial ya acepta consistencia eventual por diseño (punto 6.3b); el núcleo transaccional no cede nunca esa consistencia. El punto 12 ya fija el umbral medible de cada una: la arquitectura no necesita improvisar cuando ese umbral llegue, solo ejecutar lo que ya está escrito.
 
 ### 15. Conclusiones
 * **Balance del diseño:** Resumen de los principales hallazgos, lecciones aprendidas y compromisos asumidos entre rendimiento, consistencia, simplicidad y costo dentro de la solución de datos planteada.
