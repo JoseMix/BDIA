@@ -401,23 +401,3 @@ Sobre `vectorial/modelo_vectorial.md` (autoría de N. Lastra), cuya estructura g
 **Matiz sobre el segundo requisito.** Para "identificar consultas frecuentes" existe una alternativa más barata y honesta: una tabla `categorias` con `consultas.id_categoria` y un `GROUP BY`. Es menos ambiciosa, requiere etiquetado manual y se queda corta ante temas nuevos —justo cuando detectarlos más importa—, pero **es suficiente para ese requisito puntual**. Lo que esa alternativa no resuelve es el otro requisito: da el tema, no la respuesta concreta a sugerir. Es ahí, en la sugerencia de respuesta, donde la solución vectorial es indispensable y no meramente conveniente.
 
 **Condición de aceptación.** La solución vectorial se justifica **siempre que se cumplan tres condiciones**, porque sin ellas hace más daño que bien: (1) anonimización previa al cálculo del embedding, no previa a mostrarlo — el vector conserva información del texto original; (2) RLS efectiva sobre la tabla de vectores, lo que exige `id_cliente`/`id_ticket` y una identidad de base de datos para el sistema de IA, que hoy no existe (`roles` solo tiene Operador, Supervisor y Administrador); (3) la sugerencia se entrega **al operador como borrador**, nunca automáticamente al cliente. El modelo relacional ya soporta esa tercera condición y es su mejor decisión de diseño para este punto: la sugerencia de IA vive como respuesta no final y un humano crea la final, patrón visible en las cadenas 1→2, 5→6 y 13→14 de los datos de ejemplo.
-
----
-
-## Anexo — Inconsistencias encontradas entre documentación e implementación
-
-Detectadas durante la inspección. No afectan la conclusión del punto 9, pero conviene corregirlas antes de la entrega.
-
-| # | Ubicación | Inconsistencia |
-|---|---|---|
-| 1 | `db/conceptual/restricciones.md` vs. `01_creacion_tablas.sql` | Calificación **"rango de 0 a 5"** en el conceptual; `CHECK (calificacion BETWEEN 1 AND 5)` en el físico. Los datos de ejemplo usan 2–5 |
-| 2 | `db/conceptual/restricciones.md` | Nombres divergentes: `nota_satisfaccion` → `calificacion`; `es_final` → `es_respuesta_final`; `texto_pregunta` → `pregunta` |
-| 3 | `db/conceptual/restricciones.md` | Menciona **Instagram** como canal; el `CHECK` admite solo `chat`, `email`, `whatsapp`, `telefono`, `web` |
-| 4 | `db/conceptual/restricciones.md` | Dice que `es_humano` es "dominio cerrado con dos valores: `IA` o `HUMAN`"; el físico lo implementa como `BOOLEAN` |
-| 5 | `docs/informe.md`, consulta 5 de la sección 10 | Error de tipeo: `GROUP BY canal_origen, estado_actual0` — sobra el `0`. El `.sql` está correcto |
-| 6 | `docs/informe.md` sección 10 vs. `05_consultas_representativas.sql` | El informe documenta 5 consultas y las numera distinto que el `.sql`, que tiene 8. La "Consulta 5" del informe es la "CONSULTA 4" del `.sql` |
-| 7 | `docs/informe.md` sección 1 vs. esquema | Atribuye al Administrador la gestión de "parámetros del sistema"; **no existe tabla de parámetros** |
-| 8 | Esquema físico | `consultas` y `respuestas` **no tienen columna de fecha**. Impide ordenar respuestas en el tiempo y obliga a derivar la recencia de `conversaciones.fecha` o de `ticket_logs` |
-| 9 | `db/fisico/01_creacion_tablas.sql` vs. `docker-compose.yml` | La imagen es `pgvector/pgvector:pg16` pero no se ejecuta `CREATE EXTENSION vector`. Coherente con lo declarado en 8.1, pero deja la infraestructura sin usar |
-| 10 | `nosql/`, `anexos/` | Vacíos. El primero es coherente con la decisión de 7.2 (ningún motor NoSQL); el segundo (`material_complementario.md`, 0 bytes) queda pendiente |
-| 11 | Numeración general | El punto 9 de la consigna es la **sección 11** del informe. Las secciones 3, 4, 5, 14 y 15 siguen como plantilla |

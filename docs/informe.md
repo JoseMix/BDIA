@@ -232,7 +232,7 @@ El archivo `db/fisico/04_validaciones.sql` comprueba automáticamente:
 Cada prueba informa un mensaje `OK` cuando PostgreSQL rechaza o procesa el caso de la forma esperada. Como el script completo finaliza con `ROLLBACK`, los registros temporales utilizados en las pruebas no permanecen almacenados.
 
 ### 10. Consultas representativas
-Breve explicación de la utilidad de cada una de las 5 consultas mínimas requeridas, adjuntando el código correspondiente:
+Breve explicación de la utilidad de cada una de las 5 consultas mínimas requeridas, adjuntando el código correspondiente. `db/consultas/05_consultas_representativas.sql` tiene 8 consultas numeradas 1 a 8; estas 5 son la 1, 3, 7, 8 y 4 de ese archivo, en ese orden, elegidas para cubrir las cinco categorías que pide la consigna:
 1. **Consulta 1 (Selección y filtrado):** ¿Qué tickets tiene pendiente cierto operador? Muestra los trabajos que todavía tiene por terminar el operador.
 
 ```sql
@@ -514,7 +514,6 @@ La etapa 4 da la funcionalidad más vistosa del enunciado y es deliberadamente l
 
 ### 13. Estrategia de seguridad, permisos y aislamiento
 
-> **Nota de alcance:** esta sección usa los nombres reales del modelo físico implementado (`db/fisico/01_creacion_tablas.sql`): tablas `clientes`, `empleados`, `roles`, `tickets`, `ticket_logs`, `conversaciones`, `consultas`, `respuestas`, y la tabla vectorial `consultas_embeddings` propuesta en `vectorial/modelo_vectorial.md`. El motor confirmado es **PostgreSQL 16 + pgvector**, sin componente NoSQL adicional (punto 7 del informe). La implementación de roles, RLS y `GRANT` que describe esta sección está en `db/fisico/05_seguridad_permisos.sql` (aditivo: no modifica 01/02/04) y fue **ejecutada y probada** contra una instancia real de PostgreSQL 18 sobre los datos de ejemplo de `data/03_datos_ejemplo.sql` — no es una propuesta sin verificar.
 
 * **Tipos de usuarios y roles.** El dominio no es multi-tenant (una sola empresa), por lo que el aislamiento relevante es entre clientes entre sí y entre roles internos. Se identifican los mismos cinco actores ya descritos en el punto 1 del informe — cuatro humanos más el propio sistema de IA como actor con permisos diferenciados:
   - **Cliente:** no es un empleado (no tiene fila en `roles`); se identifica por su propio registro en `clientes`.
@@ -600,8 +599,57 @@ La etapa 4 da la funcionalidad más vistosa del enunciado y es deliberadamente l
 * **Implementado y probado — `db/fisico/05_seguridad_permisos.sql`.** El script es aditivo: no modifica `01_creacion_tablas.sql`, `02_indices_vistas.sql` ni `04_validaciones.sql` (la corrección de `security_invoker` sobre la vista es un `ALTER VIEW` dentro del script nuevo, no una edición del archivo de Fran). Se ejecutó de punta a punta contra una instancia real de PostgreSQL 18 — `01` → `02` → `03` (datos de ejemplo) → `05` — y se verificaron con `SET ROLE` + variables de sesión, entre otros: un operador solo ve sus 3 tickets asignados (vía tabla y vía la vista); un cliente solo ve sus propios tickets; supervisor ve los 10; una sesión sin autenticar ve 0 filas en lugar de romper; el operador no puede leer `clientes.dni`; nadie puede `UPDATE`/`DELETE` sobre `ticket_logs`; el rol de servicio de IA puede insertar sugerencias (`es_humano = false`) pero no puede insertar haciéndose pasar por humano, ni el operador puede responder consultas de tickets ajenos. Las 13 validaciones de `04_validaciones.sql` se corrieron después y siguen pasando sin cambios. No quedó nada corriendo: la instancia de prueba se creó y se destruyó por completo, no se tocó ningún servicio del entorno del usuario.
 
 ### 14. Consideraciones de escalabilidad y rendimiento
-* **Puntos críticos de crecimiento:** Identificación de las estructuras que experimentarán mayor incremento de volumen de datos o consultas.
-* **Estrategia de optimización:** Propuesta de índices necesarios, particionamiento de datos, precalculados o separación de componentes operacionales/analíticos.
+
+* **Puntos críticos de crecimiento.**
+
+  | Estructura | Por qué crece | Proporción de partida (datos de ejemplo) | Qué se rompe primero al escalar |
+  |---|---|---|---|
+  | `ticket_logs` | Append-only por diseño (nunca `UPDATE`/`DELETE`, sección 13): cada cambio de estado de cada ticket agrega una fila, para siempre | 31 filas / 10 tickets ≈ 3,1 por ticket | Es la única tabla del núcleo cuyo crecimiento no está acotado por cantidad de entidades, sino por entidades × eventos × tiempo. Con miles de tickets/mes sostenidos durante varios años sería la primera en llegar a varios millones de filas. No se rompe la lectura de un ticket puntual (el índice compuesto la mantiene barata a cualquier volumen) — se rompen las operaciones sobre la tabla completa: `VACUUM`/`ANALYZE`, backups, o un indicador histórico sin filtro de fecha |
+  | `conversaciones` / `consultas` / `respuestas` | Crecen con el volumen de interacción, acotadas por ticket pero no por el tiempo que ese ticket permanece abierto | 10 / 12 / 17 filas (~1,4 respuestas por consulta) | La Consulta 3 (`GROUP BY es_humano` sin ventana de tiempo sobre toda `respuestas`): un agregado sin filtro de fecha escala linealmente con el total histórico, no con la actividad reciente que un tablero de gestión realmente necesita |
+  | `clientes` / `empleados` / `tickets` | Acotadas por cantidad de entidades, pero **nunca se achican**: la baja es lógica (`activo = false`, sección 13), no `DELETE` físico | Volumen bajo hoy | Crecen más despacio que `ticket_logs` (sin el eje tiempo), pero un índice sobre estas tablas carga indefinidamente filas ya inactivas para el negocio — no hay purga que lo compense |
+  | `consultas_embeddings` (si se materializa) | Solo indexaría casos **cerrados y con respuesta final validada** (`vectorial/modelo_vectorial.md`, punto 1) | Corpus elegible hoy: 2 casos sobre 10 tickets (punto 11) | Si la funcionalidad de sugerencia de respuestas tiene éxito, este corpus crece con el mismo eje temporal que `ticket_logs` — y es ese crecimiento, no una fecha en el calendario, el que convierte al scan secuencial (hoy más exacto que `HNSW`, ver más abajo) en el cuello de botella |
+
+* **Estrategia de optimización.** Frente a cada punto crítico de la tabla anterior, la solución ya está en uno de dos estados: **construida**, o **decidida con un disparador concreto para construirla**. En ningún caso queda para pensar en el momento.
+
+  **Ya construido — decisiones tomadas antes de que hubiera un problema de escala real:**
+
+  - **Índices para lectura acotada (`db/fisico/02_indices_vistas.sql`).** Un índice por cada FK del camino caliente (`idx_tickets_id_cliente`, `idx_tickets_empleado_activos`, `idx_ticket_logs_ticket_fecha`, `idx_conversaciones_id_ticket`, `idx_consultas_id_conversacion`, `idx_respuestas_id_consulta`) ya garantiza que leer "los tickets de un cliente" o "el último estado de un ticket" sea una búsqueda logarítmica, no un recorrido completo, a cualquier volumen. La sección 13 ya señala que esto abarata las políticas RLS sobre `tickets`; vale extender la observación a `conversaciones`/`consultas`/`respuestas`, donde la policy filtra vía una subconsulta que hace `JOIN` hasta `tickets` (la de `consultas`, por ejemplo, recorre `conversaciones INNER JOIN tickets`) — esos mismos índices de navegación son los que sostienen esa cadena a escala, sin duplicar índices para seguridad y para performance por separado.
+
+  - **`tickets.id_empleado` desnormalizado (punto 6.3a).** No es una optimización pendiente: ya está en el esquema implementado, y se justificó específicamente para que "qué tickets tiene asignados un operador ahora" —la consulta más frecuente del sistema— nunca dependa de recalcular sobre `ticket_logs`, que es la tabla que más crece. Es preparación para escala decidida antes de que existiera un problema de escala.
+
+  - **Roles nativos + Row Level Security (`db/fisico/05_seguridad_permisos.sql`, sección 13).** El aislamiento por cliente/operador ya corre a nivel de motor, ejecutado y probado contra Postgres real. Cuando crezca la cantidad de usuarios no hay rediseño pendiente: es la misma implementación de hoy operando sobre más filas y más roles activos a la vez.
+
+  **Ya decidido — sin construir todavía, pero con umbral y mecanismo ya especificados, no a definir cuando el volumen aparezca:**
+
+  - **La separación del componente vectorial (punto 6.3b).** La decisión de diseño ya está tomada, y justificada específicamente por escala —que la búsqueda semántica no compita por I/O con la atención de tickets en curso—, aunque `consultas_embeddings` no exista todavía como tabla física (así lo dejan explícito los puntos 11, 12 y 13). Cuando se cree, nace ya separada; no es algo a decidir en el momento en que el volumen lo exija.
+
+  - **Dos índices con condición de activación ya definida:** si el planner no puede usar el único índice existente sobre `tickets.id_empleado` (`idx_tickets_empleado_activos`, parcial, `WHERE activo = TRUE`) para la policy `operador_ve_asignados` —que filtra sin esa condición— (conviene verificarlo con `EXPLAIN`), el reemplazo ya está identificado: un índice simple `idx_tickets_id_empleado`. Y un índice de texto completo (`tsvector` + `GIN`, `spanish` + `unaccent`) sobre `consultas.pregunta`/`respuestas.texto_respuesta` ya está propuesto por el punto 12 (etapa 3) para el momento en que exista búsqueda léxica por palabra clave, hoy inexistente.
+
+  - **Particionamiento de `ticket_logs` por rango de fecha**, para cuando las operaciones sobre la tabla completa (`VACUUM`, `ANALYZE`, backups, un indicador histórico sin filtro) empiecen a degradarse pese a los índices puntuales — es la única tabla que crece también en el eje tiempo (fila anterior). El mecanismo ya está especificado: particionamiento declarativo de PostgreSQL (`PARTITION BY RANGE (fecha)`, particiones mensuales o trimestrales), compatible con "nunca borrado físico" porque particionar no es eliminar.
+
+  - **Vista materializada para las consultas agregadas.** Las Consultas 3 y 5 (punto 10) recalculan sobre el histórico completo en cada ejecución, sin ventana de tiempo — el primer patrón en volverse costoso a medida que crece el total. El reemplazo ya está escrito, en el esquema `analitico` que propone el punto 12 (etapa 2), listo para crearse cuando el refresco periódico deje de ser prematuro:
+
+    ```sql
+    -- Propuesta, no implementada -- vive en el futuro esquema `analitico`
+    -- (punto 12, etapa 2), no en db/fisico/.
+    CREATE MATERIALIZED VIEW analitico.tickets_por_canal_y_estado AS
+    SELECT canal_origen, estado_actual, COUNT(*) AS cantidad_tickets
+    FROM vw_estado_actual_tickets
+    WHERE activo = TRUE
+    GROUP BY canal_origen, estado_actual;
+
+    -- Refresco periodico (planificador externo o pg_cron), no en
+    -- cada lectura del tablero:
+    REFRESH MATERIALIZED VIEW CONCURRENTLY analitico.tickets_por_canal_y_estado;
+    ```
+
+  - **Separación operacional/analítica**, incluidos los esquemas por capas del punto 12 (`analitico`, `ia`): ninguno existe todavía, pero el punto 12 ya fija tanto el disparador (consultas agregadas compitiendo por recursos con la operación) como la acción (réplica de lectura, no un Data Warehouse aparte — esa complejidad ya se descarta a esta escala en la sección 7.3).
+
+  - **`HNSW` sobre `consultas_embeddings`**, para cuando el corpus (que crece con el mismo eje temporal que `ticket_logs`, si la funcionalidad de sugerencia tiene éxito) deje de caber en un scan secuencial exacto. Hoy, con un corpus de dos dígitos, el scan secuencial no es solo suficiente: es *más exacto* que `HNSW`, que es un índice aproximado (punto 11) — construirlo ahora perdería precisión sin ganar velocidad. El umbral y el mecanismo ya están identificados; también una advertencia para cuando llegue: combinar `HNSW` con un filtro muy selectivo (un `WHERE id_cliente = ...` de RLS) puede devolver menos de *k* resultados, así que la estrategia ya decidida es filtrar primero y calcular distancia exacta sobre el subconjunto filtrado, no al revés.
+
+  - **Connection pooling para usuarios concurrentes.** Más clientes y operadores conectados a la vez agota conexiones de Postgres antes de que cualquier tabla se vuelva grande. El mecanismo estándar (pgbouncer o similar) ya tiene resuelta la parte que podría romperlo: la sección 13 ya identificó y verificó que hace falta `SET LOCAL`, no `SET`, para que una conexión reciclada entre pedidos de usuarios distintos no arrastre el `id_cliente`/`id_empleado` de un pedido anterior. Activar pooling no requiere resolver esa corrección en el momento; ya está resuelta.
+
+  La frontera entre lo ya construido y lo ya decidido no es arbitraria: la misma pregunta que ya justificó la elección de motor (punto 7) —el compromiso entre **simplicidad, rendimiento, consistencia y costo**— es la que la traza. Lo construido son piezas sin costo de mantenimiento propio ni sacrificio de consistencia: índices, una columna desnormalizada, roles y RLS que ya hacían falta por seguridad de todos modos. Lo decidido-pero-no-construido son piezas que, activadas hoy, agregarían infraestructura para pagar y operar (réplica, motor vectorial) o consistencia para sacrificar (vista materializada con refresco periódico, `HNSW` aproximado) sin que exista todavía volumen que lo justifique — la vista materializada queda desactualizada entre refrescos, la réplica tiene *lag*, el índice vectorial ya acepta consistencia eventual por diseño (punto 6.3b); el núcleo transaccional no cede nunca esa consistencia. El punto 12 ya fija el umbral medible de cada una: la arquitectura no necesita improvisar cuando ese umbral llegue, solo ejecutar lo que ya está escrito.
 
 ### 15. Conclusiones
 * **Balance del diseño:** Resumen de los principales hallazgos, lecciones aprendidas y compromisos asumidos entre rendimiento, consistencia, simplicidad y costo dentro de la solución de datos planteada.
