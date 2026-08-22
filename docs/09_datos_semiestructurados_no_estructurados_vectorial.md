@@ -64,7 +64,7 @@ Esto completa, con evidencia del código, el cuadro que la sección 3 del inform
 - La imagen elegida es **`pgvector/pgvector:pg16`**: la infraestructura ya viene preparada para vectores, pero `01_creacion_tablas.sql` **no ejecuta `CREATE EXTENSION vector` ni crea `consultas_embeddings`**. El informe lo reconoce explícitamente en 8.1. No hay contradicción, pero sí una brecha entre infraestructura lista y esquema sin usarla.
 - Sin motor NoSQL: la decisión está justificada en la sección 7.2 del informe (MongoDB, Cassandra, Neo4j, Redis y bases vectoriales dedicadas evaluadas y descartadas). El directorio `nosql/` está vacío, coherente con esa decisión.
 - Persistencia: volumen Docker `postgres_data`. **No hay almacenamiento de archivos/objetos** de ningún tipo.
-- Modelo de acceso: **RLS mencionado en el diseño (R1, 7.2, sección 5 de `modelo_vectorial.md`) pero no implementado** — no hay `CREATE POLICY`, ni `CREATE ROLE`, ni `ALTER TABLE ... ENABLE ROW LEVEL SECURITY` en ningún script.
+- Modelo de acceso: **RLS implementada sobre las 8 tablas del núcleo** (`db/fisico/05_seguridad_permisos.sql`: roles nativos, `CREATE POLICY`, `ALTER TABLE ... ENABLE ROW LEVEL SECURITY`, probado contra Postgres real — sección 13). Falta únicamente sobre `consultas_embeddings`, que no existe físicamente todavía.
 
 ---
 
@@ -292,12 +292,12 @@ Es el riesgo R3 del informe y el más probable en la práctica. Tres variantes d
 2. **El texto no cambió pero el mundo sí.** *"Se aceptan tarjetas de credito, debito y transferencia bancaria"* (respuesta 12, generada por IA y marcada como final) sigue siendo idéntica cuando la empresa deja de aceptar transferencias. **Ningún trigger detecta esto**, porque no hubo `UPDATE`. Solo lo mitigan la ventana de recencia y la revisión periódica. **Riesgo abierto y estructural.**
 3. **El modelo de embeddings cambió.** Si se cambia de modelo, los vectores viejos **no son comparables** con los nuevos: las distancias entre espacios distintos no significan nada. Obliga a reindexar el corpus completo. Por eso `modelo_embedding` es obligatorio, y por eso conviene poder convivir con dos modelos durante la migración.
 
-### 6.3 Autorización y filtrado insuficiente por permisos
+### 6.3 Autorización y filtrado por permisos
 
-El punto más grave, y sobre él hay dos hallazgos concretos:
+Dos aspectos separados, con alcance distinto:
 
-- **La tabla propuesta no tiene columnas por las que escribir la política de RLS que el diseño declara** (5.4). La intención está documentada; la estructura no la soporta.
-- **No existe identidad de base de datos para el "Sistema de IA".** La sección 1 del informe lo presenta como un usuario con permisos propios, y dice —correctamente— que debe operar "con las mismas restricciones de acceso que aplican al usuario que dispara la consulta". Pero `roles` tiene **3 filas: Operador, Supervisor, Administrador**. No hay rol de IA ni de Cliente, ni un solo `CREATE ROLE`/`CREATE POLICY` en los scripts. Hoy, en la práctica, la IA consultaría con las credenciales de la aplicación, es decir **con permiso sobre todo el corpus**. Ese es el escenario exacto que el informe advierte: el control de accesos vulnerado por una puerta lateral. **Riesgo abierto**, y su resolución pertenece al punto 13 (seguridad y aislamiento), pero se decide acá: sin `id_cliente` en la tabla vectorial, el punto 13 no tiene sobre qué escribir la política.
+- **Identidades y RLS del núcleo.** `db/fisico/05_seguridad_permisos.sql` (sección 13 del informe) define los cinco roles de la sección 1 —incluido `rol_sistema_ia`, que solo puede insertar sugerencias (`es_humano = false`) y no tiene lectura propia amplia— y RLS sobre las 8 tablas del núcleo, probado contra Postgres real. La IA opera "con las mismas restricciones de acceso que aplican al usuario que dispara la consulta", tal como pide la sección 1, en vez de con credenciales de aplicación con acceso a todo el corpus.
+- **La tabla vectorial es lo que queda por cerrar.** `consultas_embeddings` no existe físicamente, y la propuesta de `modelo_vectorial.md` no tiene columnas por las que escribir una política de RLS (5.4). Sin `id_cliente`/`id_ticket` propios, no hay sobre qué aplicarle a esa tabla el mismo mecanismo que ya protege al resto del núcleo.
 
 ### 6.4 Falsos positivos y resultados semánticamente similares pero incorrectos
 
@@ -416,10 +416,8 @@ Detectadas durante la inspección. No afectan la conclusión del punto 9, pero c
 | 4 | `db/conceptual/restricciones.md` | Dice que `es_humano` es "dominio cerrado con dos valores: `IA` o `HUMAN`"; el físico lo implementa como `BOOLEAN` |
 | 5 | `docs/informe.md`, consulta 5 de la sección 10 | Error de tipeo: `GROUP BY canal_origen, estado_actual0` — sobra el `0`. El `.sql` está correcto |
 | 6 | `docs/informe.md` sección 10 vs. `05_consultas_representativas.sql` | El informe documenta 5 consultas y las numera distinto que el `.sql`, que tiene 8. La "Consulta 5" del informe es la "CONSULTA 4" del `.sql` |
-| 7 | `docs/informe.md` sección 1 vs. `roles` | El informe describe 5 tipos de usuario (Cliente, Operador, Supervisor, Administrador, **Sistema de IA**); `roles` tiene 3 filas y no hay `CREATE ROLE`/`CREATE POLICY` en ningún script |
-| 8 | `docs/informe.md` (RLS en R1, 7.2) | La RLS se menciona como mecanismo central de mitigación y **no está implementada** en ninguna parte |
-| 9 | `docs/informe.md` sección 1 vs. esquema | Atribuye al Administrador la gestión de "parámetros del sistema"; **no existe tabla de parámetros** |
-| 10 | Esquema físico | `consultas` y `respuestas` **no tienen columna de fecha**. Impide ordenar respuestas en el tiempo y obliga a derivar la recencia de `conversaciones.fecha` o de `ticket_logs` |
-| 11 | `db/fisico/01_creacion_tablas.sql` vs. `docker-compose.yml` | La imagen es `pgvector/pgvector:pg16` pero no se ejecuta `CREATE EXTENSION vector`. Coherente con lo declarado en 8.1, pero deja la infraestructura sin usar |
-| 12 | `nosql/`, `anexos/` | Vacíos. El primero es coherente con la decisión de 7.2 (ningún motor NoSQL); el segundo (`material_complementario.md`, 0 bytes) queda pendiente |
-| 13 | Numeración general | El punto 9 de la consigna es la **sección 11** del informe. Las secciones 3, 4, 5, 12, 13, 14 y 15 siguen como plantilla |
+| 7 | `docs/informe.md` sección 1 vs. esquema | Atribuye al Administrador la gestión de "parámetros del sistema"; **no existe tabla de parámetros** |
+| 8 | Esquema físico | `consultas` y `respuestas` **no tienen columna de fecha**. Impide ordenar respuestas en el tiempo y obliga a derivar la recencia de `conversaciones.fecha` o de `ticket_logs` |
+| 9 | `db/fisico/01_creacion_tablas.sql` vs. `docker-compose.yml` | La imagen es `pgvector/pgvector:pg16` pero no se ejecuta `CREATE EXTENSION vector`. Coherente con lo declarado en 8.1, pero deja la infraestructura sin usar |
+| 10 | `nosql/`, `anexos/` | Vacíos. El primero es coherente con la decisión de 7.2 (ningún motor NoSQL); el segundo (`material_complementario.md`, 0 bytes) queda pendiente |
+| 11 | Numeración general | El punto 9 de la consigna es la **sección 11** del informe. Las secciones 3, 4, 5, 14 y 15 siguen como plantilla |

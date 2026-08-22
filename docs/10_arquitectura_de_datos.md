@@ -22,7 +22,7 @@ Antes de proponer una arquitectura conviene ser preciso sobre cuánto de ella es
 | Datos preparados para IA | **Diseñados, no construidos.** `vectorial/modelo_vectorial.md` es una propuesta; no hay `CREATE EXTENSION vector` en ningún script |
 | Componentes de consulta | **Parcial:** la vista `vw_estado_actual_tickets` y las 8 consultas. No hay API, ni FTS, ni servicio de recuperación |
 | Consumidores | **No existen.** Cero código de aplicación en el repositorio |
-| Control de acceso | **No existe.** Ni un `CREATE ROLE`, ni un `CREATE POLICY`, ni `ENABLE ROW LEVEL SECURITY` |
+| Control de acceso | **Implementado para el núcleo** (`db/fisico/05_seguridad_permisos.sql`, sección 13 del informe): roles nativos, `ENABLE ROW LEVEL SECURITY` y `CREATE POLICY` sobre las 8 tablas, probado contra Postgres real. Falta solo sobre `consultas_embeddings`, que no existe físicamente |
 | Infraestructura | `docker-compose.yml`: PostgreSQL (`pgvector/pgvector:pg16`) + pgAdmin. Un solo contenedor de base |
 
 En términos de arquitectura: **está construida la capa operacional y nada más**. Todo lo que sigue es propuesta, y por eso el criterio rector de este punto es que **cada capa se pueda incorporar por separado y el sistema funcione sin las que faltan**.
@@ -447,7 +447,7 @@ Cuatro etapas, en orden de dependencia, cada una entregable por separado:
 
 | Etapa | Qué incluye | Depende de | Habilita |
 |---:|---|---|---|
-| **1** | Roles de PostgreSQL + RLS sobre las 8 tablas; `respuestas.fecha`; `parametros` | nada (el esquema ya existe) | Todo lo demás. **Es la etapa que hoy falta y bloquea el resto**: sin identidades no hay a quién aplicarle una política, y sin fecha no hay recencia |
+| **1** | `respuestas.fecha`; `parametros` (roles de PostgreSQL y RLS sobre las 8 tablas del núcleo ya implementados y probados, `db/fisico/05_seguridad_permisos.sql`, sección 13) | nada (el esquema ya existe) | Todo lo demás. Falta la fecha para tener recencia |
 | **2** | Esquema `analitico` con las vistas materializadas de los indicadores existentes + planificador de refresco | etapa 1 | Tableros de supervisión sin recalcular sobre el histórico |
 | **3** | FTS (`tsvector` + GIN, `spanish` + `unaccent`); esquema `crudo`; adaptadores de canal; outbox + worker; proceso de auto-cierre | etapa 1 | Ingesta real, búsqueda léxica, y **el reloj que hace crecer el corpus** (3.6) |
 | **4** | Anonimización; curación de elegibilidad; `ia.corpus_casos`; `CREATE EXTENSION vector`; `ia.consultas_embeddings` con los metadatos corregidos; servicio de recuperación híbrido | etapa 3 | Sugerencia de respuestas y panel de temas frecuentes |
@@ -488,7 +488,7 @@ Ninguno de estos umbrales está cerca hoy, y decirlo es parte de la justificaci�
 1. **Con el criterio de indexación corregido, el corpus elegible hoy es de 2 casos de 10 tickets** —y de 1 si se exige validación humana— porque **solo 3 tickets llegan a `cerrado`** (y uno de ellos, el 7, está dado de baja) mientras **5 quedan detenidos en `resuelto`** sin que exista proceso alguno que los cierre. Falta una regla de auto-cierre que es a la vez una regla de negocio ausente y **el reloj que hace crecer la capa de IA**. Sin ella, esa capa nunca se llena.
 2. **"Respuesta final" no implica "reutilizable".** *"El pedido sera entregado durante el dia de hoy"* (`id_respuesta` 6) es correcta, humana, final, de un ticket activo — y sugerirla la semana que viene es directamente falso. Ningún filtro del punto 9 la detecta, porque no está desactualizada ni es de IA ni es intermedia: es **específica del caso**. Eso obliga a que la capa de procesado tenga un criterio de generalizabilidad, y ese criterio necesita una señal que hoy no existe en el modelo (`respuestas.reutilizable`, marcada por el operador).
 
-**La consecuencia de ambos:** la capa de IA debe quedar **diseñada, implementable y desactivada**, y toda la arquitectura tiene que funcionar sin ella —el operador atiende, los indicadores se calculan, la búsqueda léxica responde. Esa es la propiedad que hace que este diseño se pueda construir en cuatro etapas empezando por la que hoy falta y bloquea a todas las demás: **las identidades de base de datos y la RLS**, que el informe cita como mitigación central desde el punto 2 y que no tienen una sola línea de código en el proyecto.
+**La consecuencia de ambos:** la capa de IA debe quedar **diseñada, implementable y desactivada**, y toda la arquitectura tiene que funcionar sin ella —el operador atiende, los indicadores se calculan, la búsqueda léxica responde. Esa es la propiedad que hace que este diseño se pueda construir en cuatro etapas empezando por **las identidades de base de datos y la RLS**, que el informe cita como mitigación central desde el punto 2 y que ya están implementadas y probadas contra Postgres real en `db/fisico/05_seguridad_permisos.sql` (sección 13); de la etapa 1 queda pendiente `respuestas.fecha` y `parametros`.
 
 ---
 
