@@ -240,7 +240,7 @@ Sin esta capa, el corpus se llena de respuestas verdaderas e irrepetibles. Es el
 Dos objetos, ambos en un esquema propio `ia`:
 
 - **`ia.corpus_casos`**: el par pregunta–respuesta ya anonimizado, curado y con sus metadatos de procedencia. Es el "dato preparado" en el sentido estricto: listo para consumir, sin PII, con trazabilidad al caso de origen.
-- **`ia.consultas_embeddings`**: el vector más los metadatos corregidos en el punto 9 (`id_cliente`, `id_ticket`, `es_humano`, `fecha_resolucion`, `hash_contenido`, `vigente`, `calificacion`, `UNIQUE (id_consulta)`).
+- **`ia.consultas_embeddings`**: el vector más los metadatos corregidos en el punto 9 (`id_cliente`, `id_ticket`, `es_humano`, `fecha_resolucion`, `hash_contenido`, `vigente`, `UNIQUE (id_consulta)`).
 
 **Cuánto contendría hoy esta capa: el cálculo exacto.** Aplicando el criterio corregido del punto 9 —estado terminal `cerrado` **y** `tickets.activo = TRUE`— sobre los datos de ejemplo:
 
