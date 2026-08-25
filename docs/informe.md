@@ -49,7 +49,7 @@ La distinción del sistema de IA como un usuario más (con sus propios permisos 
 | **Respuesta** | Consulta a la que responde, texto de la respuesta, indicador de origen (humano o automático), indicador de respuesta final | Distinguir sugerencia de IA, corrección humana y respuesta efectivamente enviada |
 | **Índice semántico** | Texto de la pregunta y de la respuesta final, canal de origen, vector de embedding, modelo utilizado, fecha de indexación, referencia a la consulta y respuesta de origen | Habilitar la búsqueda por similitud sin recalcular el embedding en cada consulta y sin bloquear las tablas operativas. Es un dato derivado, reconstruible a partir del núcleo transaccional |
 
-* **Riesgos asociados:** 
+**Riesgos asociados:** 
 | # | Riesgo | Descripción | Mitigación prevista en el diseño |
 |---|---|---|---|
 | R1 | **Exposición de datos personales** | El modelo almacena DNI, email, teléfono y dirección de personas físicas. Una consulta mal filtrada expone información sensible | Control de accesos por rol nativo del motor y *Row Level Security*, de modo que el filtro no dependa de que la aplicación lo recuerde aplicar |
@@ -71,9 +71,10 @@ Clasificación detallada de los datos del dominio según las siguientes categor�
 * **Sensibles:** [Datos que requieren protección especial].
 * **De auditoría o trazabilidad:** [Logs y registros de eventos].
 
-### 4. Modelo conceptual
-* **Diagrama conceptual:** [Insertar o hacer referencia al diagrama conceptual (DER/UML)].
-* **Descripción del dominio:** Justificación de las entidades principales, sus atributos relevantes, relaciones, cardinalidades y restricciones de negocio identificadas.
+### 4. Modelo conceptual y lógico
+* **Diagrama conceptual:** El modelo conceptual se encuentra en la ruta /conceptual/conceptual_v2.0
+* **Modelo lógico:** El modelo conceptual se encuentra en la ruta /logico/logico_v2.0
+* **Descripción del dominio:** El desglose de tablas, campos, cardinalidades se encuentra en la ruta /logico
 
 ### 5. Modelo de implementación según la tecnología elegida
 * **Detalle del modelo:** [Presentar el modelo correspondiente a la tecnología seleccionada (Tablas relacionales, Colecciones documentales, Familias de columnas, Nodos/Relaciones de Grafos, o Colecciones Vectoriales)].
