@@ -74,7 +74,7 @@ Clasificación detallada de los datos del dominio según las siguientes categor�
 ### 4. Modelo conceptual y lógico
 * **Diagrama conceptual:** El modelo conceptual se encuentra en la ruta /conceptual/conceptual_v2.0
 * **Modelo lógico:** El modelo conceptual se encuentra en la ruta /logico/logico_v2.0
-* **Descripción del dominio:** El desglose de tablas, campos, cardinalidades se encuentra en la ruta /logico
+* **Descripción del dominio:** El desglose de tablas, campos, cardinalidades se encuentra en la ruta /logico/restricciones.md
 
 ### 5. Modelo de implementación según la tecnología elegida
 * **Detalle del modelo:** [Presentar el modelo correspondiente a la tecnología seleccionada (Tablas relacionales, Colecciones documentales, Familias de columnas, Nodos/Relaciones de Grafos, o Colecciones Vectoriales)].
