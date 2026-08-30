@@ -94,7 +94,7 @@ El dominio del caso de uso "Sistema de atención al cliente con IA" se modeló a
 - **Consulta**: pregunta puntual realizada por el cliente dentro de una conversación.
 - **Respuesta**: respuesta asociada a una consulta, que puede haber sido generada por IA o por un empleado humano.
 
-Se descartó modelar **Origen** como entidad propia: al tratarse de un conjunto acotado y estable de valores (WhatsApp, Instagram, web, email, teléfono, etc.) sin atributos propios, se representa como el atributo `canal_origen` de `Ticket`, evitando una tabla innecesaria.
+Se descartó modelar **Origen** como entidad propia: al tratarse de un conjunto acotado y estable de valores (`chat`, `email`, `whatsapp`, `telefono`, `web`) sin atributos propios, se representa como el atributo `canal_origen` de `Ticket`, evitando una tabla innecesaria.
 
 **4.1.2 Atributos relevantes por entidad**
 
@@ -105,7 +105,7 @@ Se descartó modelar **Origen** como entidad propia: al tratarse de un conjunto 
 | TicketLog | id_ticket_log (PK), id_ticket (FK), id_empleado (FK), estado, fecha |
 | Empleado | id_empleado (PK), id_rol (FK), nombre, apellido, dni, departamento, activo |
 | Rol | id_rol (PK), descripcion |
-| Conversación | id_conversacion (PK), id_ticket (FK), calificacion |
+| Conversación | id_conversacion (PK), id_ticket (FK), calificacion, fecha |
 | Consulta | id_consulta (PK), id_conversacion (FK), pregunta |
 | Respuesta | id_respuesta (PK), id_consulta (FK), texto_respuesta, es_humano, es_respuesta_final |
 
@@ -137,9 +137,9 @@ Se descartó modelar **Origen** como entidad propia: al tratarse de un conjunto 
 - Todo `Ticket` debe estar asociado a un `Cliente`; no puede existir un ticket sin cliente asignado.
 - El `Cliente` se autentica en la plataforma web o se identifica aportando datos privados (DNI, email o teléfono) al contactar por otro canal, por lo que sus datos están validados al momento de generar el `Ticket`.
 - El `TicketLog` registra el historial de estados por los que atraviesa un `Ticket`. Cada entrada del log está asociada obligatoriamente a una fecha (`fecha`) y a un `Empleado` responsable de la gestión en ese momento.
-- El campo `es_humano` de `Respuesta` es un dominio cerrado con dos valores posibles: IA o humano.
+- El campo `es_humano` de `Respuesta` es un dominio cerrado con dos valores posibles, implementado como `BOOLEAN` (`TRUE` = respuesta humana, `FALSE` = respuesta generada por IA).
 
-Diagrama disponible en `docs/modelo_conceptual.png` (ruta de repositorio: `/conceptual/conceptual_v2.0`).
+Diagrama disponible en `db/conceptual/conceptual_v3.0.png`.
 
 ---
 
@@ -252,7 +252,7 @@ El modelo cumple 1FN, 2FN y 3FN en las 8 tablas: 1FN porque no hay campos multiv
 
 Las únicas desnormalizaciones intencionales son tickets.id_empleado (si solo existiera ticket_logs, para saber el operador actual habría que buscar el último registro cada vez; y si solo existiera tickets.id_empleado, se perdería el historial de por quiénes pasó el ticket. Se mantienen las dos tablas: una para el dato actual, otra para la traza completa) y la futura consultas_embeddings (duplica el texto de la pregunta y la respuesta en vez de referenciarlo con un JOIN. Si tuviera que hacer ese JOIN contra consultas/respuestas en cada búsqueda por similitud, estaría leyendo las mismas tablas que en simultáneo usa el sistema para atender tickets en vivo, compitiendo por recursos con la operación real. Al duplicar el texto, la búsqueda semántica no toca esas tablas). En ambos casos se acepta que el dato duplicado pueda quedar momentáneamente desactualizado; el resto del núcleo mantiene consistencia fuerte en todo momento.
 
-Diagrama disponible en ruta de repositorio: `/logico/logico_v2.0`. Detalle completo en `db/logico/restricciones.md`.
+Diagrama disponible en `db/logico/logico_v.2.0.png`. Detalle completo en `db/logico/restricciones.md`.
 
 ### 5. Modelo de implementación según la tecnología elegida
 
@@ -489,7 +489,7 @@ ORDER BY canal_origen, cantidad_tickets DESC;
 
 ### 11. Propuesta para datos semiestructurados, no estructurados o vectoriales
 
-> El desarrollo completo de este punto está en `docs/09_datos_semiestructurados_no_estructurados_vectorial.md` (inventario dato por dato, comparación de alternativas de almacenamiento, metadatos del índice semántico, filtros por permisos y análisis de riesgos). Lo que sigue es la síntesis.
+> El desarrollo completo de este punto está en `docs/09_datos_semiestructurados_no_estructurados_vectorial.md` (inventario dato por dato, comparación de alternativas de almacenamiento, metadatos del índice semántico, filtros por permisos y análisis de riesgos).
 
 #### 11.1 Inventario real del esquema implementado
 
