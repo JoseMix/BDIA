@@ -62,23 +62,208 @@ La distinción del sistema de IA como un usuario más (con sus propios permisos 
 | R8 | **Sesgo en los indicadores de desempeño** | Los indicadores por operador (satisfacción promedio, carga pendiente) pueden usarse para evaluar personas sin considerar la complejidad diferencial de los casos ni el volumen de calificaciones recibidas | Exponer siempre el indicador junto a su denominador (cantidad de conversaciones calificadas) y documentar que se trata de una señal de proceso, no de una calificación individual concluyente |
 
 ### 3. Clasificación de los datos según su tipo
-Clasificación detallada de los datos del dominio según las siguientes categorías:
-* **Estructurados:** [Ej. tablas relacionales].
-* **Semiestructurados:** [Ej. documentos JSON, configuraciones].
-* **No estructurados:** [Ej. texto libre, archivos, imágenes].
-* **Operacionales:** [Datos del día a día de la aplicación].
-* **Analíticos:** [Datos orientados al análisis y soporte de IA].
-* **Sensibles:** [Datos que requieren protección especial].
-* **De auditoría o trazabilidad:** [Logs y registros de eventos].
+
+* **Estructurados:** el núcleo completo del modelo relacional: `clientes`, `empleados`, `roles`, `tickets`, `ticket_logs`, `conversaciones`, `consultas` y `respuestas`. Las ocho tablas tienen esquema fijo, tipos de datos definidos, claves primarias y foráneas, y dominios cerrados controlados por restricciones `CHECK` (canal de origen, estado del ticket, calificación de satisfacción).
+
+* **Semiestructurados:** ninguno en la implementación actual. No se incluyen columnas `JSON`/`JSONB`, `ARRAY` ni `hstore` porque, con el alcance actual del sistema, no se justifica su uso: todo el dominio se resuelve con esquema fijo. A futuro, si se suman flujos como trazas de generación de IA o metadatos variables por canal, ahí sí tendría sentido incorporar JSONB para esos casos puntuales.
+
+* **No estructurados:** exactamente dos columnas de texto libre: `consultas.pregunta` y `respuestas.texto_respuesta`. Son el único dato del dominio en lenguaje natural sin estructura interna, y por eso son también los únicos candidatos a tratamiento vectorial.
+
+* **Operacionales:** el registro día a día de la atención al cliente: apertura y seguimiento de `tickets`, su historial de estados en `ticket_logs`, y el contenido de `conversaciones`, `consultas` y `respuestas` de cada caso. Es el dato que sostiene la operación en tiempo real (qué caso está abierto, quién lo atiende, qué se respondió) y alimenta, en una segunda instancia, la capa analítica.
+
+* **Analíticos:** los indicadores de calidad de servicio (tiempos de resolución, distribución de tickets por canal y estado, proporción de respuestas de IA vs. humanas, carga pendiente por operador). Hoy se calculan en caliente mediante las consultas agregadas del punto 10, directamente sobre las tablas operacionales. Se propone, como evolución (punto 12, etapa 2), materializarlos en un esquema `analitico` separado para no recalcular sobre el histórico completo en cada consulta de un tablero.
+
+* **Sensibles:** los datos personales de `clientes` (`dni`, `email`, `telefono_1`, `telefono_2`, `direccion`); el texto libre de `consultas.pregunta` y `respuestas.texto_respuesta`, que puede contener datos personales que el cliente escribió sin que el sistema lo pida (riesgo R2); y `conversaciones.calificacion`, que combinada con el resto del caso puede usarse para evaluar indebidamente a un operador puntual (riesgo R8).
+
+* **De auditoría o trazabilidad:** `ticket_logs`, diseñada como registro append-only (nunca admite `UPDATE` ni `DELETE`, ni siquiera para el rol administrador) que conserva cada cambio de estado con su `fecha` y el `empleado` responsable. A esto se suman los campos `respuestas.es_humano` y `respuestas.es_respuesta_final`, que trazan si cada respuesta fue generada por IA o por una persona y cuál fue la efectivamente enviada al cliente — la auditoría específica que pide el caso de uso sobre el desempeño del componente de IA.
 
 ### 4. Modelo conceptual y lógico
-* **Diagrama conceptual:** El modelo conceptual se encuentra en la ruta /conceptual/conceptual_v2.0
-* **Modelo lógico:** El modelo conceptual se encuentra en la ruta /logico/logico_v2.0
-* **Descripción del dominio:** El desglose de tablas, campos, cardinalidades se encuentra en la ruta /logico/restricciones.md
+
+#### 4.1 Modelo conceptual
+
+**4.1.1 Entidades principales**
+
+El dominio del caso de uso "Sistema de atención al cliente con IA" se modeló a partir de las siguientes entidades:
+
+- **Cliente**: persona que inicia una consulta con la empresa a través de algún canal.
+- **Ticket**: caso de atención abierto por un cliente. Es la entidad central que agrupa toda la interacción.
+- **TicketLog**: historial de los estados por los que atraviesa un ticket a lo largo de su ciclo de vida, incluyendo qué empleado gestionó cada cambio. Resuelve tanto la trazabilidad del caso como la derivación entre empleados.
+- **Empleado**: persona que trabaja en la empresa (operador, supervisor o administrador) y que puede gestionar tickets.
+- **Rol**: perfil que determina qué puede hacer un empleado dentro del sistema.
+- **Conversación**: intercambio dentro de un ticket. Un mismo ticket puede tener más de una conversación (por ejemplo, si el cliente retoma el caso días después).
+- **Consulta**: pregunta puntual realizada por el cliente dentro de una conversación.
+- **Respuesta**: respuesta asociada a una consulta, que puede haber sido generada por IA o por un empleado humano.
+
+Se descartó modelar **Origen** como entidad propia: al tratarse de un conjunto acotado y estable de valores (WhatsApp, Instagram, web, email, teléfono, etc.) sin atributos propios, se representa como el atributo `canal_origen` de `Ticket`, evitando una tabla innecesaria.
+
+**4.1.2 Atributos relevantes por entidad**
+
+| Entidad | Atributos |
+|---|---|
+| Cliente | id_cliente (PK), nombre, apellido, dni, email, telefono_1, telefono_2, direccion, activo |
+| Ticket | id_ticket (PK), id_cliente (FK), id_empleado (FK, operador actual), canal_origen, activo |
+| TicketLog | id_ticket_log (PK), id_ticket (FK), id_empleado (FK), estado, fecha |
+| Empleado | id_empleado (PK), id_rol (FK), nombre, apellido, dni, departamento, activo |
+| Rol | id_rol (PK), descripcion |
+| Conversación | id_conversacion (PK), id_ticket (FK), calificacion |
+| Consulta | id_consulta (PK), id_conversacion (FK), pregunta |
+| Respuesta | id_respuesta (PK), id_consulta (FK), texto_respuesta, es_humano, es_respuesta_final |
+
+**4.1.3 Relaciones y cardinalidades**
+
+| Relación | Cardinalidad | Descripción |
+|---|---|---|
+| Cliente — Ticket | 1 : N | Un cliente puede abrir varios tickets; cada ticket pertenece a un único cliente. |
+| Ticket — TicketLog | 1 : N | Un ticket acumula múltiples entradas de historial a lo largo de su ciclo de vida. |
+| TicketLog — Empleado | N : 1 | Cada entrada del historial fue gestionada por un único empleado; un empleado gestiona muchas entradas a lo largo del tiempo. |
+| Ticket — Empleado (operado por) | N : 1 | Cada ticket tiene un único empleado asignado actualmente; un empleado puede tener asignados varios tickets. |
+| Empleado — Rol | N : 1 | Cada empleado tiene un único rol asignado; un rol puede corresponder a muchos empleados. |
+| Ticket — Conversación | 1 : N | Un ticket puede contener una o más conversaciones. |
+| Conversación — Consulta | 1 : N | Dentro de una conversación pueden registrarse varias consultas puntuales del cliente. |
+| Consulta — Respuesta | 1 : N | Una consulta puede tener más de una respuesta asociada (por ejemplo, la sugerencia generada por IA y la respuesta final corregida por un operador), preservando así la trazabilidad de ambas. |
+
+**4.1.4 Justificación de decisiones de diseño**
+
+- **Ticket guarda el operador actual además de TicketLog**: es redundante (el dato ya se puede derivar del último registro de TicketLog), pero se acepta esa redundancia porque la consulta más frecuente del sistema es "qué tickets tiene asignados un operador ahora", y resolverla sin recalcular sobre el historial es más rápido. TicketLog sigue siendo necesario aparte, porque es lo único que conserva el historial completo (quién tuvo el ticket antes, cuándo cambió de estado).
+- **Consulta guarda el texto real que escribió el cliente, no una pregunta de un catálogo fijo**: cada fila de `Consulta` es la pregunta puntual de ese cliente en esa conversación (`pregunta`), variable y en lenguaje libre — no una entidad de "preguntas frecuentes" predefinidas contra la que se compara. Detectar que varias consultas distintas tratan el mismo tema (para identificar consultas frecuentes) se resuelve aparte, con búsqueda semántica, sin mezclarlo con el registro operacional.
+- **Relación 1:N entre Consulta y Respuesta**: se descartó una relación 1:1 porque el sistema debe conservar tanto la respuesta sugerida automáticamente por la IA como la respuesta final enviada por un operador humano, cuando difieren. El atributo `es_respuesta_final` permite identificar cuál de las respuestas asociadas a una consulta fue la efectivamente enviada al cliente, y `es_humano` distingue el origen (IA o humano) de cada una.
+- **Calificación asociada a la conversación, no al ticket**: dado que un ticket puede contener varias conversaciones, la evaluación de satisfacción (`calificacion`) se registró como atributo de `Conversación`, evitando la pérdida de información que ocurriría si se promediara o sobrescribiera a nivel de ticket.
+
+**4.1.5 Restricciones del dominio**
+
+- La calificación (`calificacion`) de una `Conversación` es otorgada por el cliente y debe estar en el rango de 1 a 5.
+- En `Respuesta`, el campo `es_respuesta_final` indica cuál fue la respuesta que efectivamente resolvió la consulta o cerró la conversación. Por cada `Consulta`, solo una `Respuesta` puede tener `es_respuesta_final = true`, aunque existan varias respuestas asociadas.
+- Todo `Ticket` debe abrirse con un `canal_origen` definido, tomado de un dominio cerrado de valores válidos.
+- Todo `Ticket` debe estar asociado a un `Cliente`; no puede existir un ticket sin cliente asignado.
+- El `Cliente` se autentica en la plataforma web o se identifica aportando datos privados (DNI, email o teléfono) al contactar por otro canal, por lo que sus datos están validados al momento de generar el `Ticket`.
+- El `TicketLog` registra el historial de estados por los que atraviesa un `Ticket`. Cada entrada del log está asociada obligatoriamente a una fecha (`fecha`) y a un `Empleado` responsable de la gestión en ese momento.
+- El campo `es_humano` de `Respuesta` es un dominio cerrado con dos valores posibles: IA o humano.
+
+Diagrama disponible en `docs/modelo_conceptual.png` (ruta de repositorio: `/conceptual/conceptual_v2.0`).
+
+---
+
+#### 4.2 Modelo lógico
+
+**4.2.1 Tabla `roles`**
+
+| Columna | Restricción | Justificación |
+|---|---|---|
+| id_rol | PK | Identificador único del rol |
+| descripcion | NOT NULL, UNIQUE | No deben existir roles duplicados con la misma descripción |
+
+**4.2.2 Tabla `clientes`**
+
+| Columna | Restricción | Justificación |
+|---|---|---|
+| id_cliente | PK | Identificador único del cliente |
+| nombre | NOT NULL | Dato obligatorio para identificar al cliente |
+| apellido | NOT NULL | Dato obligatorio para identificar al cliente |
+| dni | UNIQUE, NOT NULL | No puede haber dos clientes con el mismo documento |
+| email | UNIQUE, NOT NULL | Se usa como canal de contacto y posible identificador de acceso |
+| telefono_1 | NOT NULL | Canal de contacto principal obligatorio |
+| telefono_2 | NULL permitido | Contacto alternativo, opcional |
+| direccion | NULL permitido | No es indispensable para dar de alta al cliente |
+| activo | NOT NULL, DEFAULT true | Soft delete: permite dar de baja al cliente sin romper la integridad referencial con `tickets` |
+
+**4.2.3 Tabla `empleados`**
+
+| Columna | Restricción | Justificación |
+|---|---|---|
+| id_empleado | PK | Identificador único del empleado |
+| id_rol | FK → roles(id_rol), NOT NULL, ON DELETE RESTRICT, ON UPDATE CASCADE | Todo empleado debe tener un rol asignado; no se permite borrar un rol con empleados activos |
+| nombre | NOT NULL | Dato obligatorio |
+| apellido | NOT NULL | Dato obligatorio |
+| dni | UNIQUE, NOT NULL | No puede haber dos empleados con el mismo documento |
+| departamento | NOT NULL | Necesario para trazabilidad organizacional |
+| activo | NOT NULL, DEFAULT true | Soft delete: preserva la trazabilidad de tickets y logs asociados a un empleado dado de baja |
+
+**4.2.4 Tabla `tickets`**
+
+| Columna | Restricción | Justificación |
+|---|---|---|
+| id_ticket | PK | Identificador único del ticket |
+| id_cliente | FK → clientes(id_cliente), NOT NULL, ON DELETE RESTRICT, ON UPDATE CASCADE | Todo ticket debe pertenecer a un cliente; no se permite eliminar un cliente con tickets asociados |
+| id_empleado | FK → empleados(id_empleado), NOT NULL, ON DELETE RESTRICT, ON UPDATE CASCADE | Todo ticket debe tener un empleado asignado actualmente (operador actual) |
+| canal_origen | NOT NULL, CHECK (IN ('chat','email','whatsapp','telefono','web')) | Restringe los valores a los canales soportados por el sistema |
+| activo | NOT NULL, DEFAULT true | Soft delete: permite "eliminar" un ticket (ej. duplicado, error de carga) sin perder su historial de logs y conversaciones |
+
+**4.2.5 Tabla `ticket_logs`**
+
+| Columna | Restricción | Justificación |
+|---|---|---|
+| id_ticket_log | PK | Identificador único del registro de auditoría |
+| id_ticket | FK → tickets(id_ticket), NOT NULL, ON DELETE RESTRICT, ON UPDATE CASCADE | Un log siempre pertenece a un ticket; el ticket no se borra físicamente, solo soft delete |
+| id_empleado | FK → empleados(id_empleado), NOT NULL, ON DELETE RESTRICT, ON UPDATE CASCADE | Todo cambio de estado queda trazado a un empleado; no se permite borrar un empleado con logs asociados (preserva auditoría) |
+| fecha | NOT NULL, DEFAULT CURRENT_TIMESTAMP | Todo evento de log debe tener fecha de registro |
+| estado | NOT NULL, CHECK (IN ('abierto','en_proceso','resuelto','cerrado','reabierto')) | Restringe los valores a los estados definidos del ciclo de vida del ticket |
+
+Tabla append-only: no admite `UPDATE` ni `DELETE` para ningún rol, incluido el administrador.
+
+**4.2.6 Tabla `conversaciones`**
+
+| Columna | Restricción | Justificación |
+|---|---|---|
+| id_conversacion | PK | Identificador único de la conversación |
+| id_ticket | FK → tickets(id_ticket), NOT NULL, ON DELETE RESTRICT, ON UPDATE CASCADE | Toda conversación pertenece a un ticket; el ticket nunca se borra físicamente, por lo que la conversación nunca queda huérfana |
+| calificacion | NULL permitido, CHECK (BETWEEN 1 AND 5) | La calificación es opcional (se completa al cerrar la conversación) pero si existe debe estar en escala válida |
+| fecha | NOT NULL, DEFAULT CURRENT_TIMESTAMP | Toda conversación debe tener fecha de inicio |
+
+**4.2.7 Tabla `consultas`**
+
+| Columna | Restricción | Justificación |
+|---|---|---|
+| id_consulta | PK | Identificador único de la consulta |
+| id_conversacion | FK → conversaciones(id_conversacion), NOT NULL, ON DELETE RESTRICT, ON UPDATE CASCADE | Toda consulta pertenece a una conversación; la conversación no tiene borrado propio, por lo que la consulta nunca queda huérfana |
+| pregunta | NOT NULL, CHECK (LENGTH(pregunta) > 0) | El texto de la consulta no puede estar vacío |
+
+**4.2.8 Tabla `respuestas`**
+
+| Columna | Restricción | Justificación |
+|---|---|---|
+| id_respuesta | PK | Identificador único de la respuesta |
+| id_consulta | FK → consultas(id_consulta), NOT NULL, ON DELETE RESTRICT, ON UPDATE CASCADE | Toda respuesta pertenece a una consulta; la consulta no tiene borrado propio, por lo que la respuesta nunca queda huérfana |
+| texto_respuesta | NOT NULL, CHECK (LENGTH(texto_respuesta) > 0) | El texto de la respuesta no puede estar vacío |
+| es_humano | NOT NULL, DEFAULT false | Debe quedar explícito si la respuesta la generó un agente humano o el sistema de IA |
+| es_respuesta_final | NOT NULL, DEFAULT false | Debe quedar explícito si es la respuesta definitiva de la consulta o un intento intermedio |
+
+
+
+**4.2.9 Resumen de políticas ON DELETE**
+
+| Relación | Política | Justificación |
+|---|---|---|
+| empleados.id_rol → roles.id_rol | RESTRICT | No se elimina un rol en uso |
+| tickets.id_cliente → clientes.id_cliente | RESTRICT | No se elimina un cliente con historial de tickets |
+| tickets.id_empleado → empleados.id_empleado | RESTRICT | No se elimina un empleado con tickets asignados activos |
+| ticket_logs.id_ticket → tickets.id_ticket | RESTRICT | El historial no se pierde; el ticket solo admite soft delete |
+| ticket_logs.id_empleado → empleados.id_empleado | RESTRICT | Se preserva la auditoría aunque el empleado sea dado de baja |
+| conversaciones.id_ticket → tickets.id_ticket | RESTRICT | El ticket nunca se borra físicamente |
+| consultas.id_conversacion → conversaciones.id_conversacion | RESTRICT | La conversación nunca se borra físicamente |
+| respuestas.id_consulta → consultas.id_consulta | RESTRICT | La consulta nunca se borra físicamente |
+
+**4.2.10 Criterio de soft delete**
+
+No se realiza borrado físico sobre entidades con historial asociado. Solo `clientes`, `empleados` y `tickets` tienen flag `activo`; `roles`, `ticket_logs`, `conversaciones`, `consultas` y `respuestas` no lo necesitan por ser registros históricos inmutables o por depender del estado de su tabla padre.
+
+**4.2.11 Normalización**
+
+El modelo cumple 1FN, 2FN y 3FN en las 8 tablas: 1FN porque no hay campos multivaluados (`telefono_1`/`telefono_2` son columnas separadas) y toda PK es simple; 2FN se cumple automáticamente al no existir ninguna PK compuesta; 3FN se verificó revisando dependencias transitivas, sin encontrar ninguna (el caso límite analizado, `empleados.departamento` vs. `id_rol`, se descarta porque un mismo rol puede existir en más de un departamento).
+
+Las únicas desnormalizaciones intencionales son tickets.id_empleado (si solo existiera ticket_logs, para saber el operador actual habría que buscar el último registro cada vez; y si solo existiera tickets.id_empleado, se perdería el historial de por quiénes pasó el ticket. Se mantienen las dos tablas: una para el dato actual, otra para la traza completa) y la futura consultas_embeddings (duplica el texto de la pregunta y la respuesta en vez de referenciarlo con un JOIN. Si tuviera que hacer ese JOIN contra consultas/respuestas en cada búsqueda por similitud, estaría leyendo las mismas tablas que en simultáneo usa el sistema para atender tickets en vivo, compitiendo por recursos con la operación real. Al duplicar el texto, la búsqueda semántica no toca esas tablas). En ambos casos se acepta que el dato duplicado pueda quedar momentáneamente desactualizado; el resto del núcleo mantiene consistencia fuerte en todo momento.
+
+Diagrama disponible en ruta de repositorio: `/logico/logico_v2.0`. Detalle completo en `db/logico/restricciones.md`.
 
 ### 5. Modelo de implementación según la tecnología elegida
-* **Detalle del modelo:** [Presentar el modelo correspondiente a la tecnología seleccionada (Tablas relacionales, Colecciones documentales, Familias de columnas, Nodos/Relaciones de Grafos, o Colecciones Vectoriales)].
-* **Estructuras específicas:** Definición de claves primarias, foráneas, tipos de campos, restricciones de integridad e índices según aplique.
+
+* **Detalle del modelo:** el modelo se implementó como tablas relacionales en PostgreSQL: 8 tablas (`roles`, `clientes`, `empleados`, `tickets`, `ticket_logs`, `conversaciones`, `consultas`, `respuestas`) con relaciones 1:N resueltas mediante claves foráneas. No se necesitan tablas intermedias N:M porque el dominio no presenta relaciones muchos-a-muchos. No se eligió un modelo documental, columnar, de grafos ni vectorial como núcleo; la única extensión no relacional prevista es `pgvector`, para búsqueda semántica sobre consultas y respuestas, que aún no forma parte de la implementación mínima.
+
+* **Estructuras específicas:**
+  - **Claves primarias:** cada tabla usa una columna autonumérica (`IDENTITY`) como PK simple.
+  - **Claves foráneas:** las 8 relaciones usan `FOREIGN KEY` con `ON DELETE RESTRICT` y `ON UPDATE CASCADE`, para no perder historial ante una baja.
+  - **Restricciones de integridad:** `NOT NULL` en campos obligatorios, `UNIQUE` en identificadores naturales (`clientes.dni`, `clientes.email`, `empleados.dni`, `roles.descripcion`), `CHECK` en los dominios cerrados (`canal_origen`, `estado`, `calificacion` entre 1 y 5, longitud mínima de texto libre), y `DEFAULT` donde corresponde (`activo = true`, `fecha = CURRENT_TIMESTAMP`, `es_humano = false`, `es_respuesta_final = false`).
+  - **Índices:** nueve índices sobre las columnas de los JOIN más frecuentes (uno por cada FK del camino cliente→ticket→conversación→consulta→respuesta), más un índice único parcial que garantiza una sola respuesta marcada como final por consulta.
+  - **Vistas:** `vw_estado_actual_tickets`, que resuelve en una sola consulta el cliente, empleado asignado y último estado de cada ticket.
 
 ### 6. Decisiones de normalización, embebido, referencia o desnormalización
 
