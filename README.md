@@ -72,7 +72,7 @@ BDIA/
 
 ## Instrucciones para ejecutar o revisar la implementación mínima
 
-Levantar la base (PostgreSQL 16 + pgvector en `:5432`, pgAdmin en `:8080`; credenciales `postgres`/`postgres`, base `bdia`):
+Levantar la base (PostgreSQL 16 + pgvector en `:5432`, base de datos `bdia`, usuario `postgres`/`postgres`; pgAdmin en `:8080` con login propio — detalle abajo):
 
 ```bash
 docker compose up -d
@@ -95,6 +95,25 @@ Hay un segundo archivo con prefijo `05` en una carpeta distinta, `db/consultas/0
 ```bash
 docker exec -i bdia_postgres psql -U postgres -d bdia < db/consultas/05_consultas_representativas.sql
 ```
+
+### Explorar la base con pgAdmin (opcional)
+
+pgAdmin queda disponible en `localhost:8080` apenas corre `docker compose up -d`. Tiene dos logins distintos, fáciles de confundir:
+
+- **Login web de pgAdmin** (la pantalla de entrada en `localhost:8080`): usuario `admin@admin.com`, contraseña `admin`.
+- **Conexión al servidor Postgres** (se configura *después*, ya adentro de pgAdmin): usuario `postgres`, contraseña `postgres` — las mismas credenciales que usan los comandos `psql` de más arriba.
+
+Para registrar el servidor la primera vez (click derecho en "Servers" → Register → Server):
+
+| Pestaña | Campo | Valor |
+|---|---|---|
+| General | Name | `bdia` (o el que prefieras, es solo la etiqueta en el árbol) |
+| Connection | Host name/address | `postgres` — **no** `localhost` ni `127.0.0.1`: pgAdmin corre en su propio contenedor, separado del de la base, y `postgres` es el nombre del servicio en `docker-compose.yml`, resoluble por la red interna que arma Docker Compose |
+| Connection | Port | `5432` |
+| Connection | Maintenance database | `bdia` |
+| Connection | Username / Password | `postgres` / `postgres` |
+
+Las tablas quedan en **Servers → bdia → Databases → bdia → Schemas → public → Tables**. Para correr un query suelto sin pasar por la terminal, click derecho sobre la base `bdia` → **Query Tool**.
 
 ## Principales decisiones de diseño
 
