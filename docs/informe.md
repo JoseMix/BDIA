@@ -1,4 +1,19 @@
 
+# TP Integrador — Sistema de Atención al Cliente con IA
+
+## TP Integrador Bases de Datos para IA (CEIA)
+
+**Integrantes:**
+
+- Putrino, Daniela
+- Lastra, Nicolás
+- Silva, José Miguel
+- Curcho, Franco
+- Valle, Alejandro
+- Castro, José Roberto
+
+---
+
 ### 1. Descripción del caso de uso
 * **Problema a resolver:** una empresa recibe consultas de sus clientes por múltiples canales (chat web, correo electrónico, WhatsApp, teléfono y formulario web) y hoy los atiende de manera dispersa: cada canal deja su propio registro, no existe un identificador único de caso que atraviese la interacción completa y el conocimiento generado al resolver una consulta se pierde una vez finalizada la atención.
 
