@@ -49,7 +49,8 @@ La distinción del sistema de IA como un usuario más (con sus propios permisos 
 | **Respuesta** | Consulta a la que responde, texto de la respuesta, indicador de origen (humano o automático), indicador de respuesta final | Distinguir sugerencia de IA, corrección humana y respuesta efectivamente enviada |
 | **Índice semántico** | Texto de la pregunta y de la respuesta final, canal de origen, vector de embedding, modelo utilizado, fecha de indexación, referencia a la consulta y respuesta de origen | Habilitar la búsqueda por similitud sin recalcular el embedding en cada consulta y sin bloquear las tablas operativas. Es un dato derivado, reconstruible a partir del núcleo transaccional |
 
-**Riesgos asociados:** 
+**Riesgos asociados:**
+
 | # | Riesgo | Descripción | Mitigación prevista en el diseño |
 |---|---|---|---|
 | R1 | **Exposición de datos personales** | El modelo almacena DNI, email, teléfono y dirección de personas físicas. Una consulta mal filtrada expone información sensible | Control de accesos por rol nativo del motor y *Row Level Security*, de modo que el filtro no dependa de que la aplicación lo recuerde aplicar |
@@ -94,7 +95,7 @@ El dominio del caso de uso "Sistema de atención al cliente con IA" se modeló a
 - **Consulta**: pregunta puntual realizada por el cliente dentro de una conversación.
 - **Respuesta**: respuesta asociada a una consulta, que puede haber sido generada por IA o por un empleado humano.
 
-Se descartó modelar **Origen** como entidad propia: al tratarse de un conjunto acotado y estable de valores (WhatsApp, Instagram, web, email, teléfono, etc.) sin atributos propios, se representa como el atributo `canal_origen` de `Ticket`, evitando una tabla innecesaria.
+Se descartó modelar **Origen** como entidad propia: al tratarse de un conjunto acotado y estable de valores (`chat`, `email`, `whatsapp`, `telefono`, `web`) sin atributos propios, se representa como el atributo `canal_origen` de `Ticket`, evitando una tabla innecesaria.
 
 **4.1.2 Atributos relevantes por entidad**
 
@@ -105,7 +106,7 @@ Se descartó modelar **Origen** como entidad propia: al tratarse de un conjunto 
 | TicketLog | id_ticket_log (PK), id_ticket (FK), id_empleado (FK), estado, fecha |
 | Empleado | id_empleado (PK), id_rol (FK), nombre, apellido, dni, departamento, activo |
 | Rol | id_rol (PK), descripcion |
-| Conversación | id_conversacion (PK), id_ticket (FK), calificacion |
+| Conversación | id_conversacion (PK), id_ticket (FK), calificacion, fecha |
 | Consulta | id_consulta (PK), id_conversacion (FK), pregunta |
 | Respuesta | id_respuesta (PK), id_consulta (FK), texto_respuesta, es_humano, es_respuesta_final |
 
@@ -137,9 +138,9 @@ Se descartó modelar **Origen** como entidad propia: al tratarse de un conjunto 
 - Todo `Ticket` debe estar asociado a un `Cliente`; no puede existir un ticket sin cliente asignado.
 - El `Cliente` se autentica en la plataforma web o se identifica aportando datos privados (DNI, email o teléfono) al contactar por otro canal, por lo que sus datos están validados al momento de generar el `Ticket`.
 - El `TicketLog` registra el historial de estados por los que atraviesa un `Ticket`. Cada entrada del log está asociada obligatoriamente a una fecha (`fecha`) y a un `Empleado` responsable de la gestión en ese momento.
-- El campo `es_humano` de `Respuesta` es un dominio cerrado con dos valores posibles: IA o humano.
+- El campo `es_humano` de `Respuesta` es un dominio cerrado con dos valores posibles, implementado como `BOOLEAN` (`TRUE` = respuesta humana, `FALSE` = respuesta generada por IA).
 
-Diagrama disponible en `docs/modelo_conceptual.png` (ruta de repositorio: `/conceptual/conceptual_v2.0`).
+Diagrama disponible en `db/conceptual/conceptual_v3.0.png`.
 
 ---
 
@@ -252,7 +253,7 @@ El modelo cumple 1FN, 2FN y 3FN en las 8 tablas: 1FN porque no hay campos multiv
 
 Las únicas desnormalizaciones intencionales son tickets.id_empleado (si solo existiera ticket_logs, para saber el operador actual habría que buscar el último registro cada vez; y si solo existiera tickets.id_empleado, se perdería el historial de por quiénes pasó el ticket. Se mantienen las dos tablas: una para el dato actual, otra para la traza completa) y la futura consultas_embeddings (duplica el texto de la pregunta y la respuesta en vez de referenciarlo con un JOIN. Si tuviera que hacer ese JOIN contra consultas/respuestas en cada búsqueda por similitud, estaría leyendo las mismas tablas que en simultáneo usa el sistema para atender tickets en vivo, compitiendo por recursos con la operación real. Al duplicar el texto, la búsqueda semántica no toca esas tablas). En ambos casos se acepta que el dato duplicado pueda quedar momentáneamente desactualizado; el resto del núcleo mantiene consistencia fuerte en todo momento.
 
-Diagrama disponible en ruta de repositorio: `/logico/logico_v2.0`. Detalle completo en `db/logico/restricciones.md`.
+Diagrama disponible en `db/logico/logico_v.2.0.png`. Detalle completo en `db/logico/restricciones.md`.
 
 ### 5. Modelo de implementación según la tecnología elegida
 
@@ -489,7 +490,7 @@ ORDER BY canal_origen, cantidad_tickets DESC;
 
 ### 11. Propuesta para datos semiestructurados, no estructurados o vectoriales
 
-> El desarrollo completo de este punto está en `docs/09_datos_semiestructurados_no_estructurados_vectorial.md` (inventario dato por dato, comparación de alternativas de almacenamiento, metadatos del índice semántico, filtros por permisos y análisis de riesgos). Lo que sigue es la síntesis.
+> El desarrollo completo de este punto está en `docs/09_datos_semiestructurados_no_estructurados_vectorial.md` (inventario dato por dato, comparación de alternativas de almacenamiento, metadatos del índice semántico, filtros por permisos y análisis de riesgos).
 
 #### 11.1 Inventario real del esquema implementado
 
@@ -517,9 +518,9 @@ JSONB se justifica **solo donde la variabilidad de esquema es real**, no como es
 
 #### 11.3 Enfoque vectorial: se justifica, acotado a 2 columnas
 
-**Qué se vectorizaría:** únicamente el par `consultas.pregunta` + su `respuestas.texto_respuesta` final, en casos **cerrados y vigentes** — 10 pares en el conjunto de ejemplo.
+**Qué se vectorizaría:** únicamente el par `consultas.pregunta` + su `respuestas.texto_respuesta` final, en casos **cerrados y vigentes** — 10 pares tienen respuesta final en el conjunto de ejemplo, pero el criterio corregido más abajo reduce el corpus realmente elegible a 2.
 
-**Por qué la búsqueda tradicional no alcanza:** es un límite de expresividad, no de rendimiento. El FTS nativo (`tsvector` + GIN, config `spanish`, con `unaccent`) es exacto, barato y **debería implementarse igual, antes que los vectores**; pero no resuelve **sinonimia ni paráfrasis**, que es el problema real (*"clave"* y *"contraseña"* no comparten lexema). La prueba está en los datos del proyecto: la consulta 1 (*"Como puedo restablecer mi contrasena?"*) y la consulta 11 (*"No puedo ingresar a la aplicacion movil"*, respondida con *"actualizar la aplicacion y restablecer la contraseña"*) son el mismo problema y **no comparten una sola palabra de contenido**.
+**Por qué la búsqueda tradicional no alcanza:** es un límite de expresividad, no de rendimiento. El FTS nativo (`tsvector` + GIN, config `spanish`, con `unaccent`) es exacto, barato y **debería implementarse igual, antes que los vectores**; pero no resuelve **sinonimia ni paráfrasis**, que es el problema real (*"clave"* y *"contraseña"* no comparten lexema). La prueba está en los datos del proyecto: la consulta 1 (*"Como puedo restablecer mi contrasena?"*) y la consulta 11 (*"No puedo ingresar a la aplicacion movil"*) son el mismo problema de fondo —la propia sugerencia de IA para la 11 (`id_respuesta` 15, no la respuesta final) ya lo detecta: *"actualizar la aplicacion y restablecer la contrasena"*— y sin embargo **las dos consultas no comparten una sola palabra de contenido** entre sí.
 
 **Metadatos que acompañan al vector.** El diseño de `vectorial/modelo_vectorial.md` incorpora, además de la referencia a `id_consulta`/`id_respuesta`, las columnas que la RLS y la trazabilidad del componente necesitan. Las tres decisivas:
 
@@ -838,4 +839,15 @@ La etapa 4 da la funcionalidad más vistosa del enunciado y es deliberadamente l
   La frontera entre lo ya construido y lo ya decidido no es arbitraria: la misma pregunta que ya justificó la elección de motor (punto 7) —el compromiso entre **simplicidad, rendimiento, consistencia y costo**— es la que la traza. Lo construido son piezas sin costo de mantenimiento propio ni sacrificio de consistencia: índices, una columna desnormalizada, roles y RLS que ya hacían falta por seguridad de todos modos. Lo decidido-pero-no-construido son piezas que, activadas hoy, agregarían infraestructura para pagar y operar (réplica, motor vectorial) o consistencia para sacrificar (vista materializada con refresco periódico, `HNSW` aproximado) sin que exista todavía volumen que lo justifique — la vista materializada queda desactualizada entre refrescos, la réplica tiene *lag*, el índice vectorial ya acepta consistencia eventual por diseño (punto 6.3b); el núcleo transaccional no cede nunca esa consistencia. El punto 12 ya fija el umbral medible de cada una: la arquitectura no necesita improvisar cuando ese umbral llegue, solo ejecutar lo que ya está escrito.
 
 ### 15. Conclusiones
-* **Balance del diseño:** Resumen de los principales hallazgos, lecciones aprendidas y compromisos asumidos entre rendimiento, consistencia, simplicidad y costo dentro de la solución de datos planteada.
+
+* **Balance del diseño.** La solución adoptada es un núcleo relacional normalizado hasta 3FN sobre un único motor (PostgreSQL + pgvector), con una extensión vectorial acotada a dos columnas y una capa de seguridad implementada a nivel de motor, no de aplicación (puntos 6, 7 y 13).
+
+  Dos hallazgos no eran visibles en el modelo estático y solo aparecieron al trazar el flujo real de los datos de ejemplo (punto 12.7). El primero: con el criterio de indexación correcto, el corpus de casos elegibles para el componente de IA es hoy de **2 sobre 10 tickets** (los tickets 2 y 10), porque 5 de los 10 quedan detenidos en `resuelto` sin que exista ningún proceso que los cierre — falta una regla de auto-cierre. Construirla requiere infraestructura que no esta en el alcance: `ticket_logs.id_empleado` es `NOT NULL`, así que un cierre automático necesita un actor a quien atribuírselo, y el proyecto no tiene ningún mecanismo de ejecución periódica corriendo. Esa infraestructura sí está definida: el punto 12.6 la ubica en la etapa 3 de un plan de cuatro, junto con el patrón outbox + worker que el punto 12.3 describe en detalle — después de la etapa 1 (identidades y RLS), la única ya construida y probada contra Postgres real.
+
+  El segundo hallazgo: "respuesta final" no equivale a "reutilizable". La respuesta del ticket 4 ("El pedido será entregado durante el día de hoy") es correcta, humana y final, y sugerirla la semana siguiente sería directamente falsa. Ninguno de los tres filtros que el diseño sí tiene la detecta — no está desactualizada (`vigente` solo cambia si el ticket se reabre, y este no se reabrió), no es de IA (`es_humano = true`), no es intermedia (`es_respuesta_final = true`) —, porque el problema no es ninguno de esos tres: la respuesta es específica de ese momento, no conocimiento general del dominio. Los dos hallazgos comparten origen: aparecen al seguir un caso de punta a punta, no al mirar el diagrama de tablas.
+
+  La lección más honesta que deja el proyecto es la asimetría entre lo diseñado y lo construido: de todo el sistema, la única pieza que se implementó y se probó contra una instancia real de PostgreSQL es la capa de seguridad — roles, Row Level Security y `GRANT` (punto 13). El resto (arquitectura por capas, componente vectorial, búsqueda léxica, auto-cierre) quedó en diseño justificado y secuenciado, no en código corriendo. No es una falla: la consigna no exige una implementación avanzada, exige justificación técnica razonable, y esa justificación es más sólida cuando distingue con claridad qué se verificó de qué se argumentó.
+
+  El compromiso entre simplicidad, rendimiento, consistencia y costo aparece una y otra vez, y siempre se resolvió del mismo lado: un motor único en vez de un stack políglota (punto 7), una arquitectura por capas dentro de ese mismo motor en vez de un Data Warehouse (punto 12), e índices y una columna desnormalizada ya construidos porque no cuestan mantenimiento extra, frente a réplicas, particionamiento o un índice vectorial dedicado que quedan decididos pero sin activar hasta que un umbral medible lo justifique (punto 14). La única consistencia que el diseño sacrifica es la del componente derivado — el índice semántico, las vistas analíticas, nunca la del núcleo transaccional: el estado de un ticket, quién lo atendió y quién respondió se mantienen con consistencia fuerte en todo momento.
+
+  La capa de IA queda, en consecuencia, diseñada, justificada y deliberadamente sin activar (detalle de por qué en el punto 11 y en las limitaciones del README) — el sistema completo funciona sin ella, que es la condición que permitió construirlo por etapas desde el principio.

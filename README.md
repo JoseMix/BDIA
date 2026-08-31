@@ -72,7 +72,7 @@ BDIA/
 
 ## Instrucciones para ejecutar o revisar la implementación mínima
 
-Levantar la base (PostgreSQL 16 + pgvector en `:5432`, pgAdmin en `:8080`; credenciales `postgres`/`postgres`, base `bdia`):
+Levantar la base (PostgreSQL 16 + pgvector en `:5432`, base de datos `bdia`, usuario `postgres`/`postgres`; pgAdmin en `:8080` con login propio — detalle abajo):
 
 ```bash
 docker compose up -d
@@ -96,6 +96,25 @@ Hay un segundo archivo con prefijo `05` en una carpeta distinta, `db/consultas/0
 docker exec -i bdia_postgres psql -U postgres -d bdia < db/consultas/05_consultas_representativas.sql
 ```
 
+### Explorar la base con pgAdmin (opcional)
+
+pgAdmin queda disponible en `localhost:8080` apenas corre `docker compose up -d`. Tiene dos logins distintos, fáciles de confundir:
+
+- **Login web de pgAdmin** (la pantalla de entrada en `localhost:8080`): usuario `admin@admin.com`, contraseña `admin`.
+- **Conexión al servidor Postgres** (se configura *después*, ya adentro de pgAdmin): usuario `postgres`, contraseña `postgres` — las mismas credenciales que usan los comandos `psql` de más arriba.
+
+Para registrar el servidor la primera vez (click derecho en "Servers" → Register → Server):
+
+| Pestaña | Campo | Valor |
+|---|---|---|
+| General | Name | `bdia` (o el que prefieras, es solo la etiqueta en el árbol) |
+| Connection | Host name/address | `postgres` — **no** `localhost` ni `127.0.0.1`: pgAdmin corre en su propio contenedor, separado del de la base, y `postgres` es el nombre del servicio en `docker-compose.yml`, resoluble por la red interna que arma Docker Compose |
+| Connection | Port | `5432` |
+| Connection | Maintenance database | `bdia` |
+| Connection | Username / Password | `postgres` / `postgres` |
+
+Las tablas quedan en **Servers → bdia → Databases → bdia → Schemas → public → Tables**. Para correr un query suelto sin pasar por la terminal, click derecho sobre la base `bdia` → **Query Tool**.
+
 ## Principales decisiones de diseño
 
 - **Núcleo relacional normalizado hasta 3FN**, con dos desnormalizaciones intencionales y documentadas: `tickets.id_empleado` (evita recalcular la asignación vigente desde `ticket_logs` en la consulta más frecuente del sistema) y la tabla vectorial `consultas_embeddings` (evita un `JOIN` en caliente contra el núcleo en cada búsqueda por similitud). Detalle en el punto 6.
@@ -118,4 +137,4 @@ Las 3 restantes del archivo (historial completo de un ticket, tiempo promedio de
 
 ## Limitaciones y posibles mejoras
 
-- **El componente vectorial está completamente diseñado (`vectorial/modelo_vectorial.md`) pero no activado.** El diseño ya resuelve RLS (columnas propias `id_cliente`/`id_ticket`, puntos 6.3b y 13), trazabilidad IA/humano, vigencia sin `DELETE` físico y reindexación idempotente — pero la tabla `consultas_embeddings` todavía no existe físicamente. Aunque existiera, con el criterio de indexación correcto el corpus de casos elegibles hoy es de 2 sobre 10 tickets: no hay volumen para que aporte valor. Falta, además, una regla de **auto-cierre** de tickets (`resuelto` sin reapertura durante N días → `cerrado`) sin la cual el corpus no tiene forma de crecer.
+- **El componente vectorial está completamente diseñado (`vectorial/modelo_vectorial.md`) pero no construido — y no por falta de tiempo, sino por una razón concreta.** La columna `embedding VECTOR(1536)` necesita vectores generados por un modelo de embeddings real (ej. OpenAI), no datos que se puedan escribir a mano. Sin acceso a ese modelo, las únicas alternativas eran dejar la tabla vacía (no demuestra nada que el diseño ya escrito no muestre) o completarla con vectores inventados (una búsqueda semántica "funcionando" sobre números al azar, engañosa en un trabajo evaluado por la solidez de la solución de datos) — se descartaron las dos. El diseño en sí ya resuelve RLS (columnas propias `id_cliente`/`id_ticket`, puntos 6.3b y 13), trazabilidad IA/humano, vigencia sin `DELETE` físico y reindexación idempotente. Aunque se generaran vectores reales, además, con el criterio de indexación correcto el corpus de casos elegibles hoy es de 2 sobre 10 tickets: no hay volumen para que aporte valor todavía. Falta, además, una regla de **auto-cierre** de tickets (`resuelto` sin reapertura durante N días → `cerrado`) sin la cual el corpus no tiene forma de crecer.
